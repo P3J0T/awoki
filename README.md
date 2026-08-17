@@ -1,12 +1,12 @@
 # Awoki
 
-**Current public release: v0.1.6**
-
 Awoki is a Docker-first harness for using OpenCode on long-running software and security investigations without treating chat history as the source of truth.
 
 It combines scoped project state, structural and semantic repository retrieval, durable evidence references, bounded verification, compaction-safe continuity, and optional Burp integration. The goal is simple: let the agent investigate naturally while keeping important claims tied to the exact repository, evidence, and runtime state that produced them.
 
-Awoki v0.1.0 is the first public semantic-versioned release and remains in a **stabilization and usefulness-evaluation phase**. The core machinery is implemented and heavily regression-tested; the next development priority is realistic security/code-review journeys, simplification, and removal of mechanisms that do not earn their complexity.
+Awoki is in a **stabilization and usefulness-evaluation phase**. The core machinery is implemented and heavily regression-tested; the development priority is realistic security/code-review journeys, simplification, and removal of mechanisms that do not earn their complexity.
+
+Release metadata is kept in [`pyproject.toml`](pyproject.toml) and [`.harness/manifest.json`](.harness/manifest.json); release history belongs in [`CHANGELOG.md`](CHANGELOG.md). The README intentionally avoids pinning a release number so this overview does not become stale when patch releases move forward.
 
 ## Why Awoki exists
 
@@ -162,7 +162,17 @@ The recommended operator path is **Docker + SSH + tmux + OpenCode**. tmux is not
 
 ### First install on the host
 
-Clone or unpack Awoki into a writable Git checkout, then:
+Clone or unpack Awoki into a writable Git checkout.
+
+If you are **replacing or recloning Awoki at a filesystem path that previously ran Awoki containers**, remove the old Compose containers before initializing the replacement checkout:
+
+```bash
+docker compose -f docker-compose.opencode.yml down --remove-orphans || true
+```
+
+Do **not** add `-v`. The purpose is to detach stale service containers from deleted/replaced host paths, not to delete persistent Docker volumes. This matters especially on Docker Desktop, where a surviving container can keep a bind mount to the old checkout even when the new checkout has the same pathname.
+
+Then initialize and start the new checkout:
 
 ```bash
 cp .env.example .env
@@ -171,10 +181,17 @@ cp .env.example .env
 make dependencies-check
 make dev-preflight
 make install-opencode-ssh
+```
+
+Only after `make install-opencode-ssh` succeeds, validate the running runtime:
+
+```bash
 make opencode-runtime-check
 ```
 
 `./init-awoki.sh` creates the local runtime layout and host SSH client key pair. `make install-opencode-ssh` / `make opencode-ssh-up` then inject only the validated public key into the container; the private key stays on the host. Do not use raw `docker compose up` as the normal first-start path.
+
+If `make install-opencode-ssh` or `make opencode-ssh-up` fails, stop at that failure and fix the startup problem first. Do not run `make opencode-runtime-check` against an old or partially started container; its secondary errors can obscure the original startup failure.
 
 Connect with the command printed by the installer, normally:
 

@@ -1118,6 +1118,21 @@ PY
         self.assertIn("opencode-recreate:", makefile)
         self.assertIn("recreate-opencode-runtime", makefile)
 
+    def test_public_install_docs_keep_release_identity_out_of_intro_copy(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        install = (ROOT / "INSTALL.txt").read_text(encoding="utf-8")
+        readme_intro = "\n".join(readme.splitlines()[:16])
+        install_intro = "\n".join(install.splitlines()[:10])
+        semver = re.compile(r"\bv\d+\.\d+\.\d+\b")
+        self.assertIsNone(semver.search(readme_intro))
+        self.assertIsNone(semver.search(install_intro))
+        self.assertIn("pyproject.toml", readme_intro)
+        self.assertIn(".harness/manifest.json", readme_intro)
+        self.assertIn("CHANGELOG.md", readme_intro)
+        self.assertIn("pyproject.toml", install_intro)
+        self.assertIn(".harness/manifest.json", install_intro)
+        self.assertIn("CHANGELOG.md", install_intro)
+
     def test_code_reranker_timeout_defaults_to_shared_profile_in_new_runtime(self) -> None:
         env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
         compose = (ROOT / "docker-compose.opencode.yml").read_text(encoding="utf-8")

@@ -1,8 +1,11 @@
-Awoki Installation Guide — v0.1.6
+Awoki Installation Guide
 
 This is the preferred Docker/OpenCode-over-SSH installation.
 For the conceptual overview and first-use workflow, read README.md first.
 For dense operational detail, see docs/OPERATOR_REFERENCE.md.
+Release metadata is authoritative in pyproject.toml and .harness/manifest.json;
+release history belongs in CHANGELOG.md. This guide intentionally does not pin
+an Awoki release number in its title.
 
 Topology
 
@@ -37,6 +40,17 @@ Check:
   ssh -V
   command -v ssh-keygen
   python3 --version
+
+Replacing or recloning an existing checkout
+
+If this filesystem path previously ran Awoki containers, detach the old service
+containers before initializing the replacement checkout:
+
+  docker compose -f docker-compose.opencode.yml down --remove-orphans || true
+
+Do NOT add -v. This cleanup is for stale containers/bind mounts, not persistent
+Docker volumes. Docker Desktop can otherwise keep a surviving container attached
+to the deleted checkout even when the replacement checkout uses the same pathname.
 
 Fresh install
 
@@ -73,9 +87,13 @@ OpenCode plugin/SDK packages to that exact resolved version. This is
 "latest / untested" until your own validation proves the stack acceptable.
 The running container does not silently auto-update.
 
-6. Validate the running OpenCode runtime:
+6. Validate the running OpenCode runtime only after step 5 succeeds:
 
   make opencode-runtime-check
+
+If make install-opencode-ssh / make opencode-ssh-up fails, stop there and fix the
+startup failure first. Do not run opencode-runtime-check against an old or partially
+started container; secondary runtime errors can hide the original startup problem.
 
 7. Connect using the SSH command printed by the installer. Default:
 
