@@ -40,6 +40,7 @@ if [[ -n "$COMPOSE_FILE" || -n "$PROBE_SERVICE" ]]; then
   echo "[awoki] waiting for qdrant on the internal Docker network (timeout ${TIMEOUT}s)" >&2
 
   if docker compose -f "$COMPOSE_FILE" run \
+    -T \
     --rm \
     --no-deps \
     --entrypoint python3 \

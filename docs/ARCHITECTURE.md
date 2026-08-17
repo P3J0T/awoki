@@ -1,6 +1,6 @@
 # Architecture
 
-> Public overview: [`../README.md`](../README.md). Dense maintainer identity and invariants: [`AWOKI_IDENTITY.md`](AWOKI_IDENTITY.md). v0.1.6 is the current public stabilization patch release; architecture changes should be justified by realistic-work evidence from [`USEFULNESS_EVALUATION.md`](USEFULNESS_EVALUATION.md).
+> Public overview: [`../README.md`](../README.md). Dense maintainer identity and invariants: [`AWOKI_IDENTITY.md`](AWOKI_IDENTITY.md). v0.1.7 is the current public stabilization patch release; architecture changes should be justified by realistic-work evidence from [`USEFULNESS_EVALUATION.md`](USEFULNESS_EVALUATION.md).
 
 ## Components
 

@@ -2,7 +2,7 @@
 
 Awoki is a continuity-first OpenCode harness for long-running evidence-backed software/security investigations: scoped project state, structural/lexical and optional semantic retrieval, durable evidence references, bounded verification, and compaction-safe continuation.
 
-v0.1.6 is the current public patch release in the stabilization/usefulness-evaluation line. For the dense maintainer identity and “what not to add casually” rules, read `docs/AWOKI_IDENTITY.md`; do not inject that dense file wholesale into normal user tasks.
+v0.1.7 is the current public patch release in the stabilization/usefulness-evaluation line. For the dense maintainer identity and “what not to add casually” rules, read `docs/AWOKI_IDENTITY.md`; do not inject that dense file wholesale into normal user tasks.
 
 ## Core components
 

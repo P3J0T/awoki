@@ -2,6 +2,17 @@
 
 Public releases use semantic versioning. The historical `R9.1.6.x` entries below are the internal pre-v0.1.0 development/stabilization line.
 
+## v0.1.7 — Qdrant non-interactive readiness correction
+
+- Fixes OpenCode-over-SSH startup failing with `the input device is not a TTY` while probing Qdrant from a temporary Compose container.
+- Passes `-T` to `docker compose run` because the readiness probe supplies its Python program over stdin and must be non-interactive.
+- Strengthens the Qdrant readiness regression so the fake Docker runner rejects probes that omit `-T`.
+- Extends source validation to require non-TTY Compose readiness probing.
+- Retains the v0.1.5 live Qdrant storage identity/write checks and v0.1.6 internal Docker-network readiness path.
+- Retains `awoki-symbol-extraction-v4`; this runtime correction does not change structural extraction semantics.
+- Public package version is `0.1.7`; internal harness version is `10.21`.
+
+
 ## v0.1.6 — Qdrant Docker-network readiness correction
 
 - Fixes OpenCode-over-SSH startup waiting on host `127.0.0.1:6333` even though the runtime consumes Qdrant through the internal Docker service `qdrant:6333`.

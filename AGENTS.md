@@ -1,6 +1,6 @@
 # Awoki Agent Rules
 
-Maintainer/context orientation: read `docs/AWOKI_IDENTITY.md` before proposing architectural expansion. v0.1.6 is in stabilization/usefulness-evaluation mode: prefer realistic-work evidence, simplification, merging, and deletion over adding another persistent mechanism. Do not inject the dense identity file wholesale into every normal task.
+Maintainer/context orientation: read `docs/AWOKI_IDENTITY.md` before proposing architectural expansion. v0.1.7 is in stabilization/usefulness-evaluation mode: prefer realistic-work evidence, simplification, merging, and deletion over adding another persistent mechanism. Do not inject the dense identity file wholesale into every normal task.
 
 You are operating inside **Awoki**, a continuity-first project/global memory, retrieval, evidence, and workflow harness for OpenCode.
 

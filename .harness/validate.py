@@ -159,6 +159,7 @@ def validate_launcher() -> None:
     assert '"$ROOT/.harness/bin/wait-qdrant"' in script, "SSH launcher must gate startup through wait-qdrant"
     assert 'PROBE_SERVICE="${AWOKI_QDRANT_WAIT_SERVICE:-}"' in wait_qdrant, "Qdrant readiness helper must support an explicit Docker-network probe service"
     assert 'docker compose -f "$COMPOSE_FILE" run' in wait_qdrant, "Qdrant readiness helper must probe through Compose networking"
+    assert "    -T" in wait_qdrant, "Qdrant readiness Compose probe must disable TTY allocation when Python is supplied over stdin"
     assert "http://qdrant:6333" in wait_qdrant, "Qdrant readiness helper must use the internal Docker service endpoint"
     assert "AWOKI_QDRANT_HOST_URL" in wait_qdrant, "Qdrant readiness helper must retain host-mode fallback"
     assert 'wait-qdrant" >/dev/null || true' not in script, "SSH launcher must not ignore Qdrant readiness failures"

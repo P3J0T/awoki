@@ -1,6 +1,6 @@
 [project]
 name = "awoki"
-version = "0.1.6"
+version = "0.1.7"
 description = "Awoki: Docker-first evidence, retrieval, verification, and continuity harness for OpenCode investigations"
 requires-python = ">=3.12"
 dependencies = [

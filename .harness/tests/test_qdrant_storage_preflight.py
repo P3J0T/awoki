@@ -115,7 +115,10 @@ class QdrantStoragePreflightTests(unittest.TestCase):
                 set -euo pipefail
                 echo "$*" >> "$FAKE_DOCKER_LOG"
                 if [[ "${1:-}" == "compose" && "${2:-}" == "version" ]]; then exit 0; fi
-                if [[ "${1:-}" == "compose" && "$*" == *" run "* ]]; then exit "${FAKE_DOCKER_RUN_STATUS:-0}"; fi
+                if [[ "${1:-}" == "compose" && "$*" == *" run "* ]]; then
+                  [[ " $* " == *" -T "* ]] || exit 64
+                  exit "${FAKE_DOCKER_RUN_STATUS:-0}"
+                fi
                 if [[ "${1:-}" == "compose" && "$*" == *" logs "* ]]; then exit 0; fi
                 exit 0
             '''), encoding='utf-8')
@@ -134,7 +137,7 @@ class QdrantStoragePreflightTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             docker_log = log.read_text(encoding='utf-8')
             self.assertIn('compose version', docker_log)
-            self.assertIn(f'compose -f {compose} run --rm --no-deps --entrypoint python3 awoki-opencode-ssh - 1', docker_log)
+            self.assertIn(f'compose -f {compose} run -T --rm --no-deps --entrypoint python3 awoki-opencode-ssh - 1', docker_log)
             self.assertIn('qdrant is ready on Docker network at http://qdrant:6333', result.stderr)
 
     def test_wait_qdrant_internal_probe_fails_closed(self):

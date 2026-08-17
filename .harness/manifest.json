@@ -205,7 +205,7 @@
     "rerank_failure": "fallback_to_fused_order",
     "rerank_provider": "optional_remote_http_or_tei"
   },
-  "harness_version": "10.20",
+  "harness_version": "10.21",
   "memory_policy": {
     "auto_promote": false,
     "automatic_capture": "meaningful_event_debounced_not_every_prompt",
@@ -271,7 +271,7 @@
     "source_layout": "registered non-Git textual evidence roots under workspace/projects/<project_id>/sources/<source_id>; identity is a canonical content-manifest hash, independent of mtime/inode/copy order",
     "source_management": "project_source_add/project_source_list/project_source_remove/project_source_default; source registration is local-only and never implies remote embedding/vector materialization"
   },
-  "release_version": "v0.1.6",
+  "release_version": "v0.1.7",
   "reliability": {
     "always_loaded": "AGENTS.md plus docs/RELIABILITY.md via OpenCode instructions",
     "assessment_model": "flexible note/claim/hypothesis/observation/question/gap/contradiction/decision nodes with strict authority, evidence provenance, first-class relations, and lifecycle; notes are non-gating",
