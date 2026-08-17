@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+home_dir="${HOME:-/home/op}"
+conf="${AWOKI_TMUX_CONF:-$home_dir/.tmux.conf}"
+local_conf="${AWOKI_TMUX_CONF_LOCAL:-$home_dir/.tmux.conf.local}"
+term="${TERM:-xterm-256color}"
+socket="awoki-config-check-$$"
+session="__awoki_config_check"
+
+fail() {
+  printf '[awoki-tmux] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ -r "$conf" ]] || fail "missing readable main configuration: $conf"
+[[ -r "$local_conf" ]] || fail "missing readable local configuration: $local_conf"
+command -v tmux >/dev/null 2>&1 || fail "tmux is not installed"
+command -v awk >/dev/null 2>&1 || fail "awk is required by Oh my tmux!"
+command -v perl >/dev/null 2>&1 || fail "perl is required by Oh my tmux!"
+command -v grep >/dev/null 2>&1 || fail "grep is required by Oh my tmux!"
+command -v sed >/dev/null 2>&1 || fail "sed is required by Oh my tmux!"
+
+cleanup() {
+  tmux -L "$socket" kill-server >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+# This is deliberately a smoke test, not an assertion over every effective
+# option. Oh my tmux! applies parts of its local layer asynchronously and tmux
+# option inheritance differs by server/client context. Those details made image
+# builds fail even when the configuration itself worked. Starting an isolated
+# server and confirming its session/window exist verifies the useful contract:
+# tmux can parse and run the installed configuration.
+HOME="$home_dir" TERM="$term" tmux -L "$socket" -f "$conf" \
+  new-session -d -s "$session" -c /awoki
+
+tmux -L "$socket" has-session -t "$session" 2>/dev/null \
+  || fail "tmux started but the validation session was not created"
+
+window_count="$(tmux -L "$socket" list-windows -t "$session" -F '#{window_id}' 2>/dev/null | wc -l | tr -d '[:space:]')"
+[[ "${window_count:-0}" -ge 1 ]] \
+  || fail "tmux validation session has no window"
+
+printf '[awoki-tmux] configuration smoke test passed: session=%s windows=%s\n' \
+  "$session" "$window_count"

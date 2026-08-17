@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+PUBLIC_KEY="$ROOT/.ssh-container/id_ed25519.pub"
+
+fail() {
+  echo "[awoki] $*" >&2
+  exit 2
+}
+
+"$ROOT/.harness/bin/prepare-opencode-ssh-keys"
+
+[[ -f "$PUBLIC_KEY" && ! -L "$PUBLIC_KEY" ]] || fail "SSH public key must be a regular file: $PUBLIC_KEY"
+command -v ssh-keygen >/dev/null 2>&1 || fail "ssh-keygen is required to validate the OpenCode SSH public key"
+ssh-keygen -lf "$PUBLIC_KEY" >/dev/null 2>&1 || fail "invalid SSH public key: $PUBLIC_KEY"
+
+line_count="$(awk 'END { print NR + 0 }' "$PUBLIC_KEY")"
+[[ "$line_count" == "1" ]] || fail "SSH public key must contain exactly one line: $PUBLIC_KEY"
+
+IFS= read -r key < "$PUBLIC_KEY" || true
+[[ -n "$key" ]] || fail "SSH public key is empty: $PUBLIC_KEY"
+[[ "$key" != *$'\r'* && "$key" != *$'\n'* ]] || fail "SSH public key contains an invalid line break"
+
+printf '%s\n' "$key"

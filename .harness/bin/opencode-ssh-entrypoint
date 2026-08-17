@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p \
+  /var/run/sshd \
+  /home/op/.ssh \
+  /home/op/.local/share/opencode \
+  /home/op/.local/share/nvim \
+  /home/op/.local/state/opencode \
+  /home/op/.local/state/nvim \
+  /home/op/.config/opencode \
+  /home/op/.config/nvim \
+  /home/op/.cache \
+  /home/op/.npm \
+  /global \
+  /etc/awoki-ssh-host-keys
+chmod 700 /home/op/.ssh
+
+# OpenTUI extracts a native shared library to /tmp and maps executable segments
+# from it. A Docker tmpfs mounted with the default noexec option produces:
+# "failed to map segment from shared object". Fail early with a useful message
+# instead of allowing OpenCode to crash after SSH login.
+tmp_exec_probe="$(mktemp /tmp/.awoki-exec-probe.XXXXXX)"
+if ! cp /bin/true "$tmp_exec_probe" \
+  || ! chmod 700 "$tmp_exec_probe" \
+  || ! "$tmp_exec_probe" >/dev/null 2>&1; then
+  rm -f "$tmp_exec_probe"
+  echo "[awoki] /tmp is not writable and executable; OpenTUI cannot load its native render library" >&2
+  echo "[awoki] remove any noexec /tmp mount and recreate the OpenCode container" >&2
+  exit 1
+fi
+rm -f "$tmp_exec_probe"
+
+# Public-key login needs an unlocked account, but password authentication remains disabled.
+passwd -d op >/dev/null 2>&1 || true
+usermod -U op >/dev/null 2>&1 || true
+
+if [[ ! -f /etc/awoki-ssh-host-keys/ssh_host_ed25519_key ]]; then
+  ssh-keygen -q -t ed25519 -N "" -f /etc/awoki-ssh-host-keys/ssh_host_ed25519_key
+fi
+if [[ ! -f /etc/awoki-ssh-host-keys/ssh_host_rsa_key ]]; then
+  ssh-keygen -q -t rsa -b 3072 -N "" -f /etc/awoki-ssh-host-keys/ssh_host_rsa_key
+fi
+chmod 600 /etc/awoki-ssh-host-keys/ssh_host_*_key
+chmod 644 /etc/awoki-ssh-host-keys/ssh_host_*_key.pub
+
+if [[ -z "${AWOKI_SSH_AUTHORIZED_KEY:-}" ]]; then
+  echo "[awoki] missing AWOKI_SSH_AUTHORIZED_KEY; start the runtime through ./run-opencode.sh or make opencode-ssh-up" >&2
+  exit 1
+fi
+if [[ "$AWOKI_SSH_AUTHORIZED_KEY" == *$'\n'* || "$AWOKI_SSH_AUTHORIZED_KEY" == *$'\r'* ]]; then
+  echo "[awoki] AWOKI_SSH_AUTHORIZED_KEY must contain exactly one public-key line" >&2
+  exit 1
+fi
+key_tmp="$(mktemp /tmp/.awoki-authorized-key.XXXXXX)"
+printf '%s\n' "$AWOKI_SSH_AUTHORIZED_KEY" > "$key_tmp"
+if ! ssh-keygen -lf "$key_tmp" >/dev/null 2>&1; then
+  rm -f "$key_tmp"
+  echo "[awoki] AWOKI_SSH_AUTHORIZED_KEY is not a valid SSH public key" >&2
+  exit 1
+fi
+install -o op -g op -m 600 "$key_tmp" /home/op/.ssh/authorized_keys
+rm -f "$key_tmp"
+unset AWOKI_SSH_AUTHORIZED_KEY
+
+cat >/etc/ssh/sshd_config.d/99-awoki-opencode.conf <<'EOF_CONFIG'
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin no
+StrictModes yes
+AuthorizedKeysFile /home/op/.ssh/authorized_keys
+HostKey /etc/awoki-ssh-host-keys/ssh_host_ed25519_key
+HostKey /etc/awoki-ssh-host-keys/ssh_host_rsa_key
+AllowUsers op
+EOF_CONFIG
+
+# Writable mounts are separate trust domains; source under /awoki stays root-owned.
+for path in \
+  /home/op \
+  /global \
+  /awoki/workspace \
+  /awoki/.harness/state \
+  /awoki/.harness/index \
+  /awoki/.harness/artifacts \
+  /awoki/.harness/memory \
+  /awoki/.harness/tmp; do
+  [[ -e "$path" ]] && chown -R op:op "$path" 2>/dev/null || true
+done
+[[ -e /awoki/.harness/notes.md ]] && chown op:op /awoki/.harness/notes.md 2>/dev/null || true
+
+# Refresh the allowlisted runtime snapshot used by clean SSH/MCP shells.
+/awoki/.harness/bin/awoki-runtime-snapshot >/dev/null
+
+# Validate runtime surfaces that otherwise fail only after SSH login: the resolved
+# OpenCode CLI/plugin/SDK tuple, the Python MCP SDK/entrypoint, and tmux config.
+if ! runuser -u op -- env -i HOME=/home/op USER=op LOGNAME=op \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  AWOKI_ROOT=/awoki \
+  /awoki/.harness/bin/opencode-runtime-compat-check >/dev/null; then
+  echo "[awoki] OpenCode runtime compatibility check failed; rebuild in latest mode or select a known-good safe version" >&2
+  exit 1
+fi
+if ! runuser -u op -- env -i \
+  HOME=/home/op USER=op LOGNAME=op \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  AWOKI_ROOT=/awoki \
+  HARNESS_ROOT=/awoki \
+  AWOKI_GLOBAL_ROOT=/global \
+  HARNESS_GLOBAL_ROOT=/global \
+  PYTHONPATH=/awoki/.harness:/awoki \
+  /awoki/.harness/bin/mcp-preflight --quiet; then
+  echo "[awoki] Awoki MCP preflight failed; rebuild the image and inspect /awoki/.harness/state/mcp-local.stderr.log" >&2
+  exit 1
+fi
+if ! runuser -u op -- env -i HOME=/home/op USER=op LOGNAME=op \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  TERM="${TERM:-xterm-256color}" LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  /awoki/.harness/bin/tmux-check >/dev/null; then
+  echo "[awoki] tmux configuration validation failed; inspect /home/op/.tmux.conf.local" >&2
+  exit 1
+fi
+
+exec /usr/sbin/sshd -D -e

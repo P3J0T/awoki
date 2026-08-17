@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import time
+from typing import Any
+import http.client
+from urllib.parse import urlsplit, urlunsplit
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1 or parsed > 256:
+        raise argparse.ArgumentTypeError("must be between 1 and 256")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0 or parsed > 600:
+        raise argparse.ArgumentTypeError("must be > 0 and <= 600")
+    return parsed
+
+
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> tuple[int, int]:
+    raw = os.environ.get(name)
+    try:
+        requested = int(raw) if raw is not None else default
+    except ValueError:
+        requested = default
+    return requested, max(minimum, min(maximum, requested))
+
+
+def _env_float(name: str, default: float, minimum: float, maximum: float) -> tuple[float, float]:
+    raw = os.environ.get(name)
+    try:
+        requested = float(raw) if raw is not None else default
+    except ValueError:
+        requested = default
+    return requested, max(minimum, min(maximum, requested))
+
+def _safe_url(value: str) -> str:
+    try:
+        parts = urlsplit(value)
+        if not parts.scheme or not parts.netloc:
+            return "<configured-nonstandard-url>"
+        host = parts.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parts.port}" if parts.port is not None else ""
+        return urlunsplit((parts.scheme, host + port, parts.path, "", ""))
+    except Exception:
+        return "<configured-unparseable-url>"
+
+
+def _error_payload(stage: str, exc: BaseException, *, elapsed: float | None = None) -> dict[str, Any]:
+    # Backend exceptions can contain request URLs, response bodies, or auth detail.
+    # Keep diagnostics useful without reflecting remote-controlled text or credentials.
+    type_name = type(exc).__name__
+    lowered = type_name.lower()
+    if "timeout" in lowered:
+        message = "request timed out"
+    elif "connect" in lowered:
+        message = "backend connection failed"
+    else:
+        message = "backend request failed"
+    result: dict[str, Any] = {
+        "stage": stage,
+        "type": type_name,
+        "message": message,
+    }
+    if elapsed is not None:
+        result["seconds"] = round(elapsed, 3)
+    return result
+
+
+
+def _embedding_request(*, base_url: str, api_key: str, model: str, inputs: list[str], timeout: float, dimensions: int | None = None) -> list[list[float]]:
+    parts = urlsplit(base_url)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError("embedding base URL must use http or https")
+    base_path = parts.path.rstrip("/")
+    path = f"{base_path}/embeddings" if base_path else "/embeddings"
+    if parts.query or parts.fragment or parts.username or parts.password:
+        raise ValueError("embedding base URL must not contain credentials, query, or fragment")
+    connection_cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+    connection = connection_cls(parts.hostname, parts.port, timeout=timeout)
+    request: dict[str, Any] = {"model": model, "input": inputs}
+    if dimensions is not None:
+        request["dimensions"] = dimensions
+    payload = json.dumps(request, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    try:
+        connection.request("POST", path, body=payload, headers=headers)
+        response = connection.getresponse()
+        body = response.read()
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError("embedding backend returned non-success status")
+        parsed = json.loads(body)
+        data = parsed.get("data") if isinstance(parsed, dict) else None
+        if not isinstance(data, list):
+            raise RuntimeError("embedding response missing data list")
+        vectors: list[list[float]] = []
+        for row in data:
+            if not isinstance(row, dict) or not isinstance(row.get("embedding"), list):
+                raise RuntimeError("embedding response row missing vector")
+            vectors.append(row["embedding"])
+        return vectors
+    finally:
+        connection.close()
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Benchmark the configured Awoki OpenAI-compatible embedding endpoint "
+            "with fixed synthetic text only. Run through awoki-runtime-env --profile "
+            "retrieval so the effective MCP configuration is used."
+        )
+    )
+    parser.add_argument("--batch-size", type=_positive_int, default=None,
+                        help="documents in the bulk probe (default: AWOKI_EMBEDDING_BATCH_SIZE or 32)")
+    parser.add_argument("--timeout-seconds", type=_positive_float, default=None,
+                        help="per-request benchmark timeout (default: max(configured bulk timeout, 180))")
+    parser.add_argument("--single-only", action="store_true", help="run only the query-sized synthetic request")
+    parser.add_argument("--bulk-only", action="store_true", help="run only the configured-batch synthetic request")
+    parser.add_argument("--json", action="store_true", help="emit one JSON object")
+    args = parser.parse_args()
+    if args.single_only and args.bulk_only:
+        parser.error("--single-only and --bulk-only are mutually exclusive")
+
+    provider = (os.environ.get("AWOKI_EMBEDDING_PROVIDER") or "openai").strip().lower()
+    model = (os.environ.get("AWOKI_EMBEDDING_MODEL") or "text-embeddings-inference").strip()
+    base_url = (os.environ.get("AWOKI_EMBEDDING_BASE_URL") or "").strip()
+    configured_api_key = (os.environ.get("AWOKI_EMBEDDING_API_KEY") or "").strip()
+    api_key = configured_api_key or "awoki-local-endpoint"
+    requested_batch, configured_batch = _env_int("AWOKI_EMBEDDING_BATCH_SIZE", 32, 1, 256)
+    requested_bulk_timeout, configured_timeout = _env_float("AWOKI_EMBEDDING_TIMEOUT_SECONDS", 30.0, 0.25, 120.0)
+    requested_query_timeout, query_timeout = _env_float("AWOKI_EMBEDDING_QUERY_TIMEOUT_SECONDS", 5.0, 0.25, 120.0)
+    _requested_retries, configured_retries = _env_int("AWOKI_EMBEDDING_MAX_RETRIES", 1, 0, 5)
+    _requested_query_retries, configured_query_retries = _env_int("AWOKI_EMBEDDING_QUERY_MAX_RETRIES", 0, 0, 5)
+    _requested_vector_size, configured_vector_size = _env_int("AWOKI_VECTOR_SIZE", 768, 64, 8192)
+    batch_size = args.batch_size or configured_batch
+    timeout = args.timeout_seconds or max(configured_timeout, 180.0)
+
+    if os.environ.get("AWOKI_RUNTIME_ENV_PROFILE") not in {"retrieval", "all"}:
+        parser.error("run through awoki-runtime-env --profile retrieval so the effective runtime configuration is available")
+    if provider not in {"openai", "openai-compatible", "openai_compatible"}:
+        parser.error(f"benchmark currently supports the OpenAI-compatible provider, got {provider!r}")
+    if not base_url and not configured_api_key:
+        parser.error("configure AWOKI_EMBEDDING_BASE_URL or AWOKI_EMBEDDING_API_KEY in the effective runtime environment")
+
+    endpoint_base = base_url or "https://api.openai.com/v1"
+    query_prefix = os.environ.get("AWOKI_QUERY_PREFIX", "")
+    document_prefix = os.environ.get("AWOKI_DOCUMENT_PREFIX", "")
+    dimensions_arg = configured_vector_size if os.environ.get("AWOKI_VECTOR_SIZE", "").isdigit() and model.startswith("text-embedding-3") else None
+    single_text = query_prefix + "where can credentials be rejected before authorization"
+    code_sample = """\
+func AuthenticateRequest(ctx context.Context, r *http.Request) error {
+    token := r.Header.Get("Authorization")
+    if token == "" {
+        return errors.New("credentials unavailable")
+    }
+    return nil
+}
+"""
+    repetitions = 20
+    documents = [document_prefix + (code_sample * repetitions) for _ in range(batch_size)]
+
+    result: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "base_url": _safe_url(base_url) if base_url else "<openai-default>",
+        "requested_batch_size": requested_batch,
+        "configured_batch_size": configured_batch,
+        "requested_bulk_timeout_seconds": requested_bulk_timeout,
+        "configured_bulk_timeout_seconds": configured_timeout,
+        "requested_query_timeout_seconds": requested_query_timeout,
+        "configured_query_timeout_seconds": query_timeout,
+        "configured_bulk_max_retries": configured_retries,
+        "configured_query_max_retries": configured_query_retries,
+        "configured_vector_size": configured_vector_size,
+        "query_prefix_chars": len(query_prefix),
+        "document_prefix_chars": len(document_prefix),
+        "dimensions_parameter_sent": dimensions_arg is not None,
+        "product_bulk_timeout_max_seconds": 120.0,
+        "benchmark_batch_size": batch_size,
+        "benchmark_timeout_seconds": timeout,
+        "benchmark_transport": "python_stdlib_http",
+        "benchmark_max_retries": 0,
+        "benchmark_follows_redirects": False,
+        "synthetic_text_only": True,
+        "synthetic_document_chars": len(documents[0]) if documents else 0,
+        "synthetic_bulk_chars": sum(len(item) for item in documents),
+    }
+    failed = False
+
+    if not args.bulk_only:
+        started = time.monotonic()
+        try:
+            single = _embedding_request(base_url=endpoint_base, api_key=api_key, model=model, inputs=[single_text], timeout=timeout, dimensions=dimensions_arg)
+            single_elapsed = time.monotonic() - started
+            dims = len(single[0]) if single else 0
+            single_contract_ok = len(single) == 1 and dims == configured_vector_size
+            failed = failed or not single_contract_ok
+            result["single"] = {
+                "status": "ok" if single_contract_ok else "contract_mismatch",
+                "seconds": round(single_elapsed, 3),
+                "vectors": len(single),
+                "expected_vectors": 1,
+                "dimensions": dims,
+                "matches_configured_vector_size": dims == configured_vector_size,
+                "contract_ok": single_contract_ok,
+                "fits_configured_query_timeout": single_elapsed <= query_timeout,
+            }
+        except Exception as exc:
+            failed = True
+            elapsed = time.monotonic() - started
+            result["single"] = {"status": "failed", **_error_payload("single", exc, elapsed=elapsed)}
+
+    if not args.single_only:
+        started = time.monotonic()
+        try:
+            bulk = _embedding_request(base_url=endpoint_base, api_key=api_key, model=model, inputs=documents, timeout=timeout, dimensions=dimensions_arg)
+            bulk_elapsed = time.monotonic() - started
+            dims = len(bulk[0]) if bulk else 0
+            bulk_contract_ok = len(bulk) == batch_size and dims == configured_vector_size
+            failed = failed or not bulk_contract_ok
+            result["bulk"] = {
+                "status": "ok" if bulk_contract_ok else "contract_mismatch",
+                "seconds": round(bulk_elapsed, 3),
+                "vectors": len(bulk),
+                "expected_vectors": batch_size,
+                "dimensions": dims,
+                "matches_configured_vector_size": dims == configured_vector_size,
+                "contract_ok": bulk_contract_ok,
+                "seconds_per_vector": round(bulk_elapsed / max(1, len(bulk)), 3),
+                "fits_configured_bulk_timeout": bulk_elapsed <= configured_timeout,
+                "observed_2x_latency_seconds": math.ceil(bulk_elapsed * 2),
+                "observed_2x_exceeds_product_timeout_max": math.ceil(bulk_elapsed * 2) > 120,
+                "suggested_timeout_within_product_max_seconds": min(120, max(1, math.ceil(bulk_elapsed * 2))),
+            }
+        except Exception as exc:
+            failed = True
+            elapsed = time.monotonic() - started
+            result["bulk"] = {"status": "failed", **_error_payload("bulk", exc, elapsed=elapsed)}
+
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(f"provider: {provider}")
+        print(f"model: {model}")
+        print(f"base_url: {result['base_url']}")
+        print(f"requested_batch_size: {requested_batch}")
+        print(f"configured_batch_size: {configured_batch}")
+        print(f"requested_bulk_timeout_seconds: {requested_bulk_timeout:g}")
+        print(f"configured_bulk_timeout_seconds: {configured_timeout:g}")
+        print(f"requested_query_timeout_seconds: {requested_query_timeout:g}")
+        print(f"configured_query_timeout_seconds: {query_timeout:g}")
+        print(f"configured_bulk_max_retries: {configured_retries}")
+        print(f"configured_query_max_retries: {configured_query_retries}")
+        print(f"configured_vector_size: {configured_vector_size}")
+        print(f"query_prefix_chars: {len(query_prefix)}")
+        print(f"document_prefix_chars: {len(document_prefix)}")
+        print(f"dimensions_parameter_sent: {dimensions_arg is not None}")
+        print(f"benchmark_batch_size: {batch_size}")
+        print("benchmark_transport: python_stdlib_http")
+        print("benchmark_max_retries: 0")
+        print("benchmark_follows_redirects: False")
+        print(f"synthetic_document_chars: {result['synthetic_document_chars']}")
+        for stage in ("single", "bulk"):
+            row = result.get(stage)
+            if not isinstance(row, dict):
+                continue
+            print(f"{stage}_status: {row.get('status')}")
+            if row.get("status") in {"ok", "contract_mismatch"}:
+                print(f"{stage}_seconds: {row.get('seconds')}")
+                print(f"{stage}_vectors: {row.get('vectors')}")
+                print(f"{stage}_expected_vectors: {row.get('expected_vectors')}")
+                print(f"{stage}_dimensions: {row.get('dimensions')}")
+                print(f"{stage}_matches_configured_vector_size: {row.get('matches_configured_vector_size')}")
+                print(f"{stage}_contract_ok: {row.get('contract_ok')}")
+                if stage == "single":
+                    print(f"single_fits_query_timeout: {row.get('fits_configured_query_timeout')}")
+                else:
+                    print(f"bulk_seconds_per_vector: {row.get('seconds_per_vector')}")
+                    print(f"bulk_fits_configured_timeout: {row.get('fits_configured_bulk_timeout')}")
+                    print(f"bulk_observed_2x_latency_seconds: {row.get('observed_2x_latency_seconds')}")
+                    print(f"bulk_observed_2x_exceeds_product_timeout_max: {row.get('observed_2x_exceeds_product_timeout_max')}")
+                    print(f"bulk_suggested_timeout_within_product_max_seconds: {row.get('suggested_timeout_within_product_max_seconds')}")
+            else:
+                print(f"{stage}_error_type: {row.get('type')}")
+                print(f"{stage}_error: {row.get('message')}")
+                print(f"{stage}_seconds: {row.get('seconds')}")
+
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

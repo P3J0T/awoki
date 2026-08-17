@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P)
+
+fail() {
+  printf 'awoki-dev-preflight: %s\n' "$*" >&2
+  exit 2
+}
+
+[ -e "$root/.git" ] || fail "$root is not a top-level Awoki Git checkout (.git missing); do not modify the runtime appliance"
+command -v git >/dev/null 2>&1 || fail "git is required"
+
+top=$(env -i PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin HOME="${HOME:-/tmp}" \
+  git -C "$root" -c core.fsmonitor=false rev-parse --show-toplevel 2>/dev/null) \
+  || fail "git could not verify the Awoki checkout"
+top=$(CDPATH= cd -- "$top" && pwd -P)
+[ "$top" = "$root" ] || fail "Awoki checkout root mismatch: expected $root, git reports $top"
+
+[ -f "$root/README.md" ] || fail "README.md missing from Awoki checkout"
+[ -f "$root/.harness/manifest.json" ] || fail ".harness/manifest.json missing from Awoki checkout"
+[ -w "$root" ] || fail "Awoki checkout root is not writable by the current user"
+[ -w "$root/.harness" ] || fail "Awoki .harness source tree is not writable by the current user"
+
+head=$(env -i PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin HOME="${HOME:-/tmp}" \
+  git -C "$root" -c core.fsmonitor=false rev-parse HEAD 2>/dev/null) \
+  || fail "git HEAD could not be resolved"
+
+printf 'awoki_dev_checkout=ok\n'
+printf 'root=%s\n' "$root"
+printf 'head=%s\n' "$head"

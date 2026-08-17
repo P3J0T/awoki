@@ -1,0 +1,78 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Container mode: OpenCode runs inside the awoki-opencode-ssh container.
+  // Awoki MCP is selected by mcp-auto; inside this container it restores the
+  // root-owned /run/awoki/runtime.env snapshot and runs mcp-local over stdio.
+  // Do not use mcp-docker here. OpenCode invokes mcp-auto through env -i and
+  // /bin/bash --noprofile/--norc so caller-controlled shell/Python/loader/proxy
+  // state is removed before the snapshot is even sourced. Retrieval credentials
+  // come only from the validated runtime snapshot; container mode fails closed
+  // if that snapshot is unavailable.
+  "mcp": {
+    "burp": {
+      "type": "remote",
+      "url": "http://host.docker.internal:9876",
+      "enabled": true,
+      "oauth": false,
+      "timeout": 30000,
+      "headers": {
+        "Host": "127.0.0.1:9876",
+        "Origin": "http://127.0.0.1:9876"
+      }
+    },
+
+    "awoki": {
+      "type": "local",
+      "command": [
+        "/usr/bin/env", "-i",
+        "HOME=/home/op", "USER=op", "LOGNAME=op",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SHELL=/bin/bash", "LANG=C.UTF-8", "LC_ALL=C.UTF-8",
+        "/bin/bash", "--noprofile", "--norc", "/awoki/.harness/bin/mcp-auto"
+      ],
+      "cwd": "/awoki",
+      "enabled": true,
+      "timeout": 120000
+    }
+  },
+
+  "instructions": [
+    "HARNESS.md",
+    ".harness/HARNESS.md",
+    "docs/COMMANDS.md",
+    "docs/RELIABILITY.md"
+  ],
+
+  "permission": {
+    "edit": "ask",
+    "bash": "ask",
+    "todowrite": "allow",
+    "skill": {
+      "*": "allow"
+    }
+  },
+
+  "compaction": {
+    "auto": true,
+    "prune": false,
+    "reserved": 10000
+  },
+
+  "watcher": {
+    "ignore": [
+      ".git/**",
+      ".venv/**",
+      "data/**",
+      ".opencode-state/**",
+      ".ssh-container/**",
+      ".awoki-global/**",
+      "__pycache__/**",
+      ".pytest_cache/**",
+      ".harness/state/**",
+      "workspace/projects/*/index/**",
+      "workspace/projects/*/SITUATION.md",
+      "workspace/projects/*/HANDOFF.md"
+    ]
+  }
+}

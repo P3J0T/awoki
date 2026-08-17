@@ -1,0 +1,95 @@
+{
+  "artifact_schema_version": 1,
+  "description": "Frozen, offline observation of Awoki repository search before the native structural index. This is historical evidence only; the prior engine is not shipped as a runtime backend.",
+  "environment": {
+    "AWOKI_DISABLE_QDRANT": "1",
+    "AWOKI_RERANK_ENABLED": "0",
+    "network_required": false
+  },
+  "fixture": {
+    "path": "src/webhook_worker.py",
+    "project_id": "webhook",
+    "sha256": "8e250f0e305965ce6ee1c2474301122b855bf48d1b3c3225d6ca026360eaec93"
+  },
+  "limitations": [
+    "The fixture intentionally contains one meaningful source file, so positive file-level Hit@1 does not demonstrate discriminative ranking.",
+    "The pre-structural engine returned file chunks rather than symbol identities and could not provide definition, caller, callee, graph-path, branch-membership, or deterministic claim-proof evidence.",
+    "Qdrant and reranking were disabled to make the observation hermetic and reproducible.",
+    "The no-answer query returned the unrelated fixture file, demonstrating absent abstention in this controlled observation."
+  ],
+  "metrics": {
+    "no_answer_accuracy": 0.0,
+    "positive_file_hit_at_1": 1.0,
+    "positive_query_count": 3,
+    "query_count": 4
+  },
+  "observed_on": "2026-08-05",
+  "queries": [
+    {
+      "expected_no_answer": false,
+      "hits": [
+        {
+          "preview_sha256": "55c5d679c7bcd7b13f942fcd91addacfa3ac0965115227649d516c3a4b08adff",
+          "rank": 1,
+          "retrieval_backend": "sqlite_fts",
+          "score": 0.029508196721311476,
+          "source_path": "workspace/projects/webhook/repo/src/webhook_worker.py",
+          "title": "code: workspace/projects/webhook/repo/src/webhook_worker.py"
+        }
+      ],
+      "id": "definition",
+      "query": "Where is should_process_delivery defined?",
+      "status": "ok"
+    },
+    {
+      "expected_no_answer": false,
+      "hits": [
+        {
+          "preview_sha256": "55c5d679c7bcd7b13f942fcd91addacfa3ac0965115227649d516c3a4b08adff",
+          "rank": 1,
+          "retrieval_backend": "sqlite_fts",
+          "score": 0.029508196721311476,
+          "source_path": "workspace/projects/webhook/repo/src/webhook_worker.py",
+          "title": "code: workspace/projects/webhook/repo/src/webhook_worker.py"
+        }
+      ],
+      "id": "conceptual",
+      "query": "How does this repository decide whether an incoming callback has already been handled?",
+      "status": "ok"
+    },
+    {
+      "expected_no_answer": false,
+      "hits": [
+        {
+          "preview_sha256": "55c5d679c7bcd7b13f942fcd91addacfa3ac0965115227649d516c3a4b08adff",
+          "rank": 1,
+          "retrieval_backend": "sqlite_fts",
+          "score": 0.029508196721311476,
+          "source_path": "workspace/projects/webhook/repo/src/webhook_worker.py",
+          "title": "code: workspace/projects/webhook/repo/src/webhook_worker.py"
+        }
+      ],
+      "id": "caller-shaped",
+      "query": "Who calls mark_delivery_processed?",
+      "status": "ok"
+    },
+    {
+      "expected_no_answer": true,
+      "hits": [
+        {
+          "preview_sha256": "55c5d679c7bcd7b13f942fcd91addacfa3ac0965115227649d516c3a4b08adff",
+          "rank": 1,
+          "retrieval_backend": "sqlite_fts",
+          "score": 0.029508196721311476,
+          "source_path": "workspace/projects/webhook/repo/src/webhook_worker.py",
+          "title": "code: workspace/projects/webhook/repo/src/webhook_worker.py"
+        }
+      ],
+      "id": "no-answer",
+      "query": "Where is resize_thumbnail defined?",
+      "status": "ok"
+    }
+  ],
+  "source_commit": "98f5431",
+  "source_commit_full": "98f543146d3a3e7239488f263497175023874629"
+}

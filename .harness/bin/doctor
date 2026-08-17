@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
+ENV_FILE="${AWOKI_ENV_FILE:-$ROOT/.env}"
+err=0
+say() { printf '[awoki-doctor] %s\n' "$*"; }
+fail() { printf '[awoki-doctor] FAIL: %s\n' "$*" >&2; err=1; }
+
+# Read the environment exactly as Docker Compose resolves it when possible.
+# Fall back to a conservative dotenv parser so `make doctor` and
+# `docker compose` agree even though Make itself does not load `.env`.
+compose_environment=""
+
+read_dotenv_value() {
+  local key="$1"
+  [[ -f "$ENV_FILE" ]] || return 1
+  awk -v wanted="$key" '
+    function ltrim(value) { sub(/^[[:space:]]+/, "", value); return value }
+    function rtrim(value) { sub(/[[:space:]]+$/, "", value); return value }
+    {
+      sub(/\r$/, "", $0)
+      line = ltrim($0)
+      if (line == "" || substr(line, 1, 1) == "#") next
+      if (substr(line, 1, 7) == "export ") line = ltrim(substr(line, 8))
+      equals = index(line, "=")
+      if (!equals) next
+      name = rtrim(substr(line, 1, equals - 1))
+      if (name != wanted) next
+      value = ltrim(substr(line, equals + 1))
+      first = substr(value, 1, 1)
+      last = substr(value, length(value), 1)
+      if ((first == "\"" && last == "\"") || (first == "\047" && last == "\047")) {
+        value = substr(value, 2, length(value) - 2)
+      } else {
+        sub(/[[:space:]]+#.*$/, "", value)
+        value = rtrim(value)
+      }
+      print value
+      found = 1
+      exit
+    }
+    END { if (!found) exit 1 }
+  ' "$ENV_FILE"
+}
+
+compose_value() {
+  local key="$1"
+  [[ -n "$compose_environment" ]] || return 1
+  printf '%s\n' "$compose_environment" | awk -F= -v wanted="$key" '
+    $1 == wanted {
+      sub(/^[^=]*=/, "")
+      print
+      found = 1
+      exit
+    }
+    END { if (!found) exit 1 }
+  '
+}
+
+resolved_value() {
+  local key="$1"
+  local fallback="${2-}"
+  local value=""
+  if value="$(printenv "$key" 2>/dev/null)"; then
+    printf '%s' "$value"
+  elif value="$(compose_value "$key" 2>/dev/null)"; then
+    printf '%s' "$value"
+  elif value="$(read_dotenv_value "$key" 2>/dev/null)"; then
+    printf '%s' "$value"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+say "checking Docker"
+command -v docker >/dev/null 2>&1 || fail "docker not found"
+if command -v docker >/dev/null 2>&1; then
+  docker compose version >/dev/null 2>&1 || fail "docker compose plugin not available"
+  compose_environment="$(cd "$ROOT" && docker compose config --environment 2>/dev/null || true)"
+fi
+
+say "checking Python for lightweight validation"
+if command -v python3 >/dev/null 2>&1; then
+  :
+elif command -v python >/dev/null 2>&1; then
+  :
+else
+  fail "python3 not found; host validation targets need python3"
+fi
+
+say "checking disk space for images, Qdrant, and runtime data"
+avail_kb=$(df -Pk "$ROOT" | awk 'NR==2 {print $4}')
+# Container images, Qdrant, and project artifacts still need practical headroom.
+if [[ -n "${avail_kb:-}" && "$avail_kb" -lt 2097152 ]]; then
+  fail "less than 2 GiB free in repo filesystem; image/database/runtime writes may fail"
+fi
+
+say "checking configured project id"
+proj="$(resolved_value AWOKI_PROJECT_ID "$(resolved_value HARNESS_PROJECT_ID __auto__)")"
+if [[ "$proj" == "awoki" ]]; then
+  fail "AWOKI_PROJECT_ID is set to literal 'awoki'; use __auto__ or a real project id"
+fi
+
+say "checking remote embedding configuration"
+embedding_provider="$(resolved_value AWOKI_EMBEDDING_PROVIDER openai)"
+embedding_model="$(resolved_value AWOKI_EMBEDDING_MODEL text-embeddings-inference)"
+embedding_base_url="$(resolved_value AWOKI_EMBEDDING_BASE_URL "$(resolved_value AWOKI_OPENAI_BASE_URL "$(resolved_value OPENAI_BASE_URL "")")")"
+embedding_key="$(resolved_value AWOKI_EMBEDDING_API_KEY "$(resolved_value AWOKI_OPENAI_API_KEY "$(resolved_value OPENAI_API_KEY "")")")"
+vector_size="$(resolved_value AWOKI_VECTOR_SIZE 768)"
+if [[ "$embedding_provider" == "openai" && -z "$embedding_base_url" && -z "$embedding_key" ]]; then
+  say "remote embeddings are not configured; continuity and lexical search still work, but new Qdrant vectors and semantic queries will be unavailable"
+else
+  endpoint="${embedding_base_url:-OpenAI default endpoint}"
+  say "remote embeddings configured: provider=${embedding_provider}, model=${embedding_model}, endpoint=${endpoint}, vector_size=${vector_size}"
+fi
+
+say "checking qdrant port config"
+port="$(resolved_value AWOKI_QDRANT_HTTP_PORT 6333)"
+if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Ports}}' | grep -q "0.0.0.0:${port}->"; then
+  say "port ${port} appears already published by a container; this is OK only if it is this project's qdrant"
+fi
+
+if [[ "$err" -eq 0 ]]; then
+  say "doctor checks passed"
+else
+  exit "$err"
+fi

@@ -1,0 +1,93 @@
+#!/bin/bash
+set -euo pipefail
+
+# Docker's container environment is not inherited by processes started through
+# sshd. The SSH entrypoint writes an allowlisted, root-owned snapshot to /run;
+# restore it before resolving the Awoki root or runtime mode. An explicit file
+# override exists for tests and deliberate non-default container layouts.
+runtime_env_override="${AWOKI_RUNTIME_ENV_FILE:-}"
+runtime_env_file="${runtime_env_override:-/run/awoki/runtime.env}"
+initial_mode="${AWOKI_MODE:-${HARNESS_MODE:-}}"
+if [[ -r "$runtime_env_file" ]] \
+  && { [[ -f /.dockerenv ]] || [[ "$initial_mode" == "container-opencode" ]] || [[ -n "$runtime_env_override" ]]; }; then
+  if [[ -L "$runtime_env_file" ]]; then
+    echo "[awoki] refusing symlink runtime environment file: $runtime_env_file" >&2
+    exit 1
+  fi
+  if [[ -z "$runtime_env_override" && "$runtime_env_file" == "/run/awoki/runtime.env" ]]; then
+    runtime_env_dir="$(dirname "$runtime_env_file")"
+    file_uid="$(stat -c '%u' "$runtime_env_file" 2>/dev/null || true)"
+    file_mode="$(stat -c '%a' "$runtime_env_file" 2>/dev/null || true)"
+    dir_uid="$(stat -c '%u' "$runtime_env_dir" 2>/dev/null || true)"
+    dir_mode="$(stat -c '%a' "$runtime_env_dir" 2>/dev/null || true)"
+    if [[ "$file_uid" != "0" || "$dir_uid" != "0" || ! "$file_mode" =~ ^[0-7]{3,4}$ || ! "$dir_mode" =~ ^[0-7]{3,4}$ ]]; then
+      echo "[awoki] runtime environment snapshot trust validation failed: $runtime_env_file" >&2
+      exit 1
+    fi
+    file_group_digit="${file_mode: -2:1}"
+    file_other_digit="${file_mode: -1}"
+    dir_group_digit="${dir_mode: -2:1}"
+    dir_other_digit="${dir_mode: -1}"
+    if (( (10#$file_group_digit & 2) != 0 || 10#$file_other_digit != 0 || (10#$dir_group_digit & 2) != 0 || (10#$dir_other_digit & 2) != 0 )); then
+      echo "[awoki] runtime environment snapshot is writable by an untrusted group/world principal" >&2
+      exit 1
+    fi
+  fi
+  # shellcheck disable=SC1090
+  source "$runtime_env_file"
+fi
+
+ROOT="${AWOKI_ROOT:-${HARNESS_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+if [[ ! -d "$ROOT/.harness" ]]; then
+  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+fi
+cd "$ROOT"
+
+MODE="${AWOKI_MODE:-${HARNESS_MODE:-}}"
+
+# OpenCode container mode: OpenCode and Awoki MCP are in the same container.
+# Do not require Docker or Docker socket here. OpenCode may pass only the
+# per-MCP config environment, so restore the entrypoint snapshot above and then
+# normalize container-only paths here.
+if [[ "$MODE" == "container-opencode" ]] || [[ -f /.dockerenv ]]; then
+  if [[ -d /awoki/.harness ]]; then
+    ROOT=/awoki
+    cd "$ROOT"
+  fi
+  export AWOKI_ROOT="$ROOT"
+  export HARNESS_ROOT="$ROOT"
+  export AWOKI_MODE="container-opencode"
+  export HARNESS_MODE="container-opencode"
+  export AWOKI_GLOBAL_ROOT="${AWOKI_GLOBAL_ROOT:-/global}"
+  export HARNESS_GLOBAL_ROOT="${HARNESS_GLOBAL_ROOT:-$AWOKI_GLOBAL_ROOT}"
+  export AWOKI_GLOBAL_SKILLS_DIR="${AWOKI_GLOBAL_SKILLS_DIR:-$AWOKI_GLOBAL_ROOT/skills}"
+  export HARNESS_GLOBAL_SKILLS_DIR="${HARNESS_GLOBAL_SKILLS_DIR:-$AWOKI_GLOBAL_SKILLS_DIR}"
+  export AWOKI_QDRANT_CONTAINER_URL="${AWOKI_QDRANT_CONTAINER_URL:-http://qdrant:6333}"
+  export AWOKI_QDRANT_URL="$AWOKI_QDRANT_CONTAINER_URL"
+  export QDRANT_URL="$AWOKI_QDRANT_CONTAINER_URL"
+  export AWOKI_QDRANT_HOST_URL="$AWOKI_QDRANT_CONTAINER_URL"
+  export AWOKI_BURP_URL="${AWOKI_BURP_URL:-http://host.docker.internal:9876}"
+  # Relaunch through the guarded runtime wrapper so the secret-bearing MCP
+  # process does not inherit stale SSH/OpenCode PATH/PYTHON/LD/proxy variables.
+  # The dedicated mcp profile carries only Awoki paths + Qdrant/retrieval/Burp
+  # settings needed by the server; Lavish settings stay out of the MCP child.
+  if [[ -r "$runtime_env_file" && -x "$ROOT/.harness/bin/awoki-runtime-env" ]]; then
+    exec "$ROOT/.harness/bin/awoki-runtime-env" --profile mcp -- "$ROOT/.harness/bin/mcp-local"
+  fi
+  echo "[awoki] container-opencode runtime snapshot is unavailable; recreate the SSH container" >&2
+  exit 1
+fi
+
+# Explicit local mode. Useful for debugging or non-Docker installs with Python deps.
+if [[ "$MODE" == "local" ]]; then
+  exec "$ROOT/.harness/bin/mcp-local"
+fi
+
+# Host mode: OpenCode runs on the host and Awoki MCP runs through Docker.
+if command -v docker >/dev/null 2>&1; then
+  exec "$ROOT/.harness/bin/mcp-docker"
+fi
+
+# Last resort: run local if Docker is unavailable. This gives a clear Python
+# dependency error if the environment has not been installed.
+exec "$ROOT/.harness/bin/mcp-local"

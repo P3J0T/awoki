@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Exhaustive, transport-safe ripgrep fallback for repository discovery.
+
+Awoki agents should normally use `code_text_search`, which adds project policy
+and snapshot-bound cursors. This CLI is the MCP-unavailable diagnostic equivalent.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+HARNESS_DIR = Path(__file__).resolve().parents[1]
+if str(HARNESS_DIR) not in sys.path:
+    sys.path.insert(0, str(HARNESS_DIR))
+
+from code_search.text_search import DEFAULT_PREVIEW_CHARS, MAX_PAGE_SIZE, scan_files  # noqa: E402
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="exhaustive paginated repository grep fallback")
+    parser.add_argument("pattern")
+    parser.add_argument("paths", nargs="*", default=["."])
+    parser.add_argument("--page-size", type=int, default=500)
+    parser.add_argument("--cursor", type=int, default=0, help="zero-based match offset returned by the previous page")
+    parser.add_argument("--preview-chars", type=int, default=DEFAULT_PREVIEW_CHARS)
+    parser.add_argument("--ignore-case", action="store_true")
+    parser.add_argument("--fixed-string", action="store_true")
+    parser.add_argument("--include-ignored", action="store_true", help="explicit forensic mode: include gitignored files")
+    parser.add_argument("--shard-timeout-seconds", type=float, default=15.0)
+    return parser.parse_args()
+
+
+def _discover_files(rg: str, roots: list[str], *, include_ignored: bool = False) -> tuple[list[str], str]:
+    args = [rg, "--files", "--null", "--hidden", "--glob", "!.git/**", "--sort", "path"]
+    if include_ignored:
+        args.append("--no-ignore")
+    args.extend(["--", *roots])
+    try:
+        completed = subprocess.run(args, capture_output=True, check=False)
+    except OSError as exc:
+        return [], str(exc)
+    if completed.returncode not in {0, 1}:
+        message = completed.stderr.decode("utf-8", errors="replace").strip()
+        return [], message or f"ripgrep exited with status {completed.returncode}"
+    return sorted(dict.fromkeys(os.fsdecode(raw) for raw in completed.stdout.split(b"\0") if raw)), ""
+
+
+def main() -> int:
+    args = parse_args()
+    if not args.pattern or len(args.pattern.encode("utf-8", errors="replace")) > 4096:
+        print("error: pattern must be non-empty and at most 4096 UTF-8 bytes", file=sys.stderr)
+        return 2
+    if args.cursor < 0:
+        print("error: cursor must be >= 0", file=sys.stderr)
+        return 2
+    if not args.paths:
+        args.paths = ["."]
+    rg = shutil.which("rg")
+    if not rg:
+        print("error: ripgrep (rg) is required for the fallback", file=sys.stderr)
+        return 127
+    files, error = _discover_files(rg, [str(Path(path)) for path in args.paths], include_ignored=args.include_ignored)
+    if error:
+        print(f"error: file discovery failed: {error}", file=sys.stderr)
+        return 3
+    result = scan_files(
+        repo_root=Path.cwd(), pattern=args.pattern, files=files, offset=args.cursor,
+        page_size=max(1, min(args.page_size, MAX_PAGE_SIZE)), preview_chars=args.preview_chars,
+        ignore_case=args.ignore_case, fixed_string=args.fixed_string,
+        shard_timeout_seconds=max(0.0, args.shard_timeout_seconds),
+    )
+    returned = int(result.get("returned") or 0)
+    next_cursor = ""
+    if result.get("universe_complete") and not result.get("search_complete"):
+        next_cursor = str(args.cursor + returned)
+    payload = {
+        **result,
+        "mode": "exhaustive_text_fallback",
+        "pattern": args.pattern,
+        "paths": args.paths,
+        "visible_file_count": len(files),
+        "include_ignored": bool(args.include_ignored),
+        "next_cursor": next_cursor,
+        "evidence_level": "DISCOVERY ONLY",
+        "note": (
+            "Search coverage is exhaustive when universe_complete=true. Only this response page and previews are bounded; "
+            "use --cursor NEXT_CURSOR for the next page. Do not pipe through head because that discards pagination metadata."
+        ),
+    }
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    return 0 if result.get("status") in {"ok", "partial"} else 4
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

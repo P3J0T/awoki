@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="${AWOKI_ROOT:-${HARNESS_ROOT:-/awoki}}"
+if [[ ! -d "$ROOT/.harness" ]]; then
+  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+fi
+cd "$ROOT"
+export PYTHONPATH="$ROOT/.harness:$ROOT:${PYTHONPATH:-}"
+"${PYTHON:-python3}" - <<'PYINNER'
+import importlib
+mods = ["mcp", "rag_backend", "harness_core", "server"]
+for name in mods:
+    importlib.import_module(name)
+print("awoki MCP import selftest ok")
+PYINNER

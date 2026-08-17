@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="${AWOKI_ROOT:-${HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"
+PYTHONPATH="$root/.harness:$root${PYTHONPATH:+:$PYTHONPATH}" "${PYTHON:-python3}" - <<'PY'
+from __future__ import annotations
+
+import json
+
+from code_search.languages import validate_parser_runtime
+
+result = validate_parser_runtime()
+print(json.dumps(result, indent=2, sort_keys=True))
+if result.get("status") != "ok":
+    raise SystemExit("Awoki structural parser validation failed")
+PY

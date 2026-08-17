@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+GLOBAL_ROOT="${AWOKI_GLOBAL_ROOT:-${HARNESS_GLOBAL_ROOT:-$HOME/.awoki}}"
+mkdir -p "$GLOBAL_ROOT/global" "$GLOBAL_ROOT/skills"
+touch "$GLOBAL_ROOT/global/memories.jsonl"
+touch "$GLOBAL_ROOT/global/procedures.jsonl"
+touch "$GLOBAL_ROOT/global/preferences.jsonl"
+touch "$GLOBAL_ROOT/global/promotion_log.jsonl"
+echo "Initialized Awoki global root at $GLOBAL_ROOT without truncating existing memories" >&2

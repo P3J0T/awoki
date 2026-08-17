@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+SSH_DIR="$ROOT/.ssh-container"
+PRIVATE_KEY="$SSH_DIR/id_ed25519"
+PUBLIC_KEY="$SSH_DIR/id_ed25519.pub"
+
+fail() {
+  echo "[awoki] $*" >&2
+  exit 2
+}
+
+if [[ -L "$SSH_DIR" ]]; then
+  fail "$SSH_DIR must be a real directory, not a symlink"
+fi
+if [[ -e "$SSH_DIR" && ! -d "$SSH_DIR" ]]; then
+  fail "$SSH_DIR exists but is not a directory"
+fi
+mkdir -p "$SSH_DIR"
+chmod 700 "$SSH_DIR"
+
+repair_empty_docker_directory() {
+  local path="$1"
+  local label="$2"
+
+  if [[ -L "$path" ]]; then
+    fail "$label must be a regular file, not a symlink: $path"
+  fi
+  if [[ ! -e "$path" || -f "$path" ]]; then
+    return 0
+  fi
+  if [[ -d "$path" ]]; then
+    # Docker Compose short bind syntax can create a missing host file source as
+    # a directory. Repair only that safe/empty shape; never recursively delete
+    # user data from an unexpected non-empty directory.
+    chmod u+rwx "$path" 2>/dev/null || true
+    if rmdir "$path" 2>/dev/null; then
+      echo "[awoki] repaired empty directory created at expected $label path: $path" >&2
+      return 0
+    fi
+    fail "$label path is a non-empty directory; refusing to remove it automatically: $path"
+  fi
+  fail "$label must be a regular file: $path"
+}
+
+repair_empty_docker_directory "$PRIVATE_KEY" "SSH private key"
+repair_empty_docker_directory "$PUBLIC_KEY" "SSH public key"
+
+command -v ssh-keygen >/dev/null 2>&1 || fail "ssh-keygen is required to prepare OpenCode SSH keys"
+
+umask 077
+if [[ ! -f "$PRIVATE_KEY" ]]; then
+  ssh-keygen -t ed25519 -f "$PRIVATE_KEY" -N "" -C "awoki-opencode" >/dev/null
+fi
+chmod 600 "$PRIVATE_KEY"
+
+pub_tmp="$(mktemp "$SSH_DIR/.id_ed25519.pub.XXXXXX")"
+cleanup() {
+  rm -f "$pub_tmp" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+if ! ssh-keygen -y -f "$PRIVATE_KEY" > "$pub_tmp"; then
+  fail "existing SSH private key is unreadable or invalid: $PRIVATE_KEY"
+fi
+chmod 644 "$pub_tmp"
+mv -f "$pub_tmp" "$PUBLIC_KEY"
+
+
+trap - EXIT HUP INT TERM
+
+for path in "$PRIVATE_KEY" "$PUBLIC_KEY"; do
+  [[ -f "$path" && ! -L "$path" ]] || fail "SSH bootstrap did not produce a regular file: $path"
+done
+
+chmod 700 "$SSH_DIR"
+chmod 600 "$PRIVATE_KEY"
+chmod 644 "$PUBLIC_KEY"

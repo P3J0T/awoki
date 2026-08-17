@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+cd "$ROOT"
+
+VALIDATE=0
+NO_CACHE=0
+OPENCODE_INSTALL_MODE="latest"
+OPENCODE_SAFE_VERSION=""
+
+usage() {
+  cat <<'USAGE'
+Usage: .harness/bin/recreate-opencode-runtime [--validate] [--no-cache] [--opencode-latest | --opencode-safe VERSION]
+
+Rebuild and force-recreate the baked OpenCode-over-SSH runtime after Awoki source,
+Dockerfile, plugin, dependency, or Compose changes. Qdrant storage is preserved and
+Qdrant is not force-recreated.
+
+  --validate   Run full `make validate` before rebuilding.
+  --no-cache   Rebuild the OpenCode image without Docker build cache.
+  --opencode-latest
+               Resolve the current OpenCode CLI/plugin/SDK stack at image build (default; untested until this build passes validation).
+  --opencode-safe VERSION
+               Build with exactly VERSION for OpenCode CLI/plugin/SDK. Use an operator-chosen last-known-good version.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --validate) VALIDATE=1 ;;
+    --no-cache) NO_CACHE=1 ;;
+    --opencode-latest) OPENCODE_INSTALL_MODE="latest"; OPENCODE_SAFE_VERSION="" ;;
+    --opencode-safe)
+      shift
+      [[ $# -gt 0 ]] || { echo "[awoki] --opencode-safe requires VERSION" >&2; exit 2; }
+      OPENCODE_INSTALL_MODE="safe"
+      OPENCODE_SAFE_VERSION="$1"
+      ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "[awoki] unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [[ ! -x .harness/bin/awoki-dev-preflight ]]; then
+  echo "[awoki] run this from the writable Awoki source checkout" >&2
+  exit 2
+fi
+
+.harness/bin/awoki-dev-preflight
+make dependencies-check
+if (( VALIDATE )); then
+  make validate
+fi
+
+# R9.1.6.9 removed the historical stock 5-second code-rerank cap. Do not
+# silently rewrite operator configuration: warn when an old copied .env still
+# explicitly pins that value so the operator can choose whether to keep it.
+if [[ -f .env ]] && grep -Eq '^[[:space:]]*AWOKI_CODE_RERANK_TIMEOUT_SECONDS[[:space:]]*=[[:space:]]*5([[:space:]]*(#.*)?)?$' .env; then
+  cat >&2 <<'WARN'
+[awoki] note: .env still contains the historical stock setting:
+  AWOKI_CODE_RERANK_TIMEOUT_SECONDS=5
+R9.1.6.9 defaults code search to inherit AWOKI_RERANK_TIMEOUT_SECONDS instead.
+If 5 seconds was not an intentional local override, set the value empty:
+  AWOKI_CODE_RERANK_TIMEOUT_SECONDS=
+or remove the line before recreating the runtime.
+WARN
+fi
+
+build=(docker compose -f docker-compose.opencode.yml build)
+if (( NO_CACHE )); then
+  build+=(--no-cache)
+fi
+build+=(awoki-opencode-ssh)
+resolve_token="$(date -u +%Y%m%dT%H%M%S)-$$"
+AWOKI_OPENCODE_INSTALL_MODE="$OPENCODE_INSTALL_MODE" \
+AWOKI_OPENCODE_SAFE_VERSION="$OPENCODE_SAFE_VERSION" \
+AWOKI_OPENCODE_RESOLVE_TOKEN="$resolve_token" \
+"${build[@]}"
+
+# The verified launcher now owns Qdrant-first ordering and the live storage
+# contract. Ask it to force-recreate only the baked OpenCode runtime after
+# Qdrant has passed the live mount/write probe.
+AWOKI_OPENCODE_INSTALL_MODE="$OPENCODE_INSTALL_MODE" \
+AWOKI_OPENCODE_SAFE_VERSION="$OPENCODE_SAFE_VERSION" \
+AWOKI_OPENCODE_FORCE_RECREATE=1 \
+  "$ROOT/.harness/bin/run-opencode-ssh"
+make opencode-runtime-check
+
+port="${AWOKI_OPENCODE_SSH_PORT:-2222}"
+echo "[awoki] OpenCode runtime recreated and checked (install_mode=${OPENCODE_INSTALL_MODE}${OPENCODE_SAFE_VERSION:+ safe_version=${OPENCODE_SAFE_VERSION}})."
+echo "[awoki] SSH: ssh -i .ssh-container/id_ed25519 -p ${port} op@127.0.0.1"
+echo "[awoki] Then: cd /awoki && opencode"

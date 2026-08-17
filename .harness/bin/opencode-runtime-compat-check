@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+manifest="${AWOKI_OPENCODE_RUNTIME_MANIFEST:-/usr/local/share/awoki/opencode-runtime.json}"
+root="${AWOKI_ROOT:-/awoki}"
+materialize=0
+[[ "${1:-}" == "--materialize" ]] && materialize=1
+
+[[ -r "$manifest" ]] || { echo "[awoki] OpenCode runtime manifest missing: $manifest" >&2; exit 2; }
+command -v opencode >/dev/null 2>&1 || { echo "[awoki] opencode CLI missing" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || { echo "[awoki] jq required for OpenCode compatibility check" >&2; exit 2; }
+
+cli="$(opencode --version)"
+plugin_pkg="$root/.opencode/node_modules/@opencode-ai/plugin/package.json"
+sdk_pkg="$root/.opencode/node_modules/@opencode-ai/sdk/package.json"
+[[ -r "$plugin_pkg" ]] || { echo "[awoki] @opencode-ai/plugin is not materialized" >&2; exit 2; }
+[[ -r "$sdk_pkg" ]] || { echo "[awoki] @opencode-ai/sdk is not materialized" >&2; exit 2; }
+plugin="$(jq -r '.version' "$plugin_pkg")"
+sdk="$(jq -r '.version' "$sdk_pkg")"
+recorded="$(jq -r '.resolved_cli // empty' "$manifest")"
+mode="$(jq -r '.install_mode // empty' "$manifest")"
+requested="$(jq -r '.requested_safe_version // empty' "$manifest")"
+channel_state="$(jq -r '.channel_state // empty' "$manifest")"
+
+[[ "$mode" == latest || "$mode" == safe ]] || { echo "[awoki] invalid OpenCode image install mode: $mode" >&2; exit 2; }
+[[ -n "$recorded" && "$cli" == "$recorded" ]] || { echo "[awoki] OpenCode CLI differs from image manifest: cli=$cli recorded=$recorded" >&2; exit 2; }
+[[ "$plugin" == "$cli" ]] || { echo "[awoki] OpenCode plugin API mismatch: cli=$cli plugin=$plugin" >&2; exit 2; }
+[[ "$sdk" == "$cli" ]] || { echo "[awoki] OpenCode SDK API mismatch: cli=$cli sdk=$sdk" >&2; exit 2; }
+if [[ "$mode" == safe ]]; then
+  [[ "$channel_state" == operator_selected_safe ]] || { echo "[awoki] invalid safe OpenCode channel state: $channel_state" >&2; exit 2; }
+  [[ -n "$requested" && "$cli" == "$requested" ]] || { echo "[awoki] safe OpenCode version mismatch: requested=$requested resolved=$cli" >&2; exit 2; }
+else
+  [[ "$channel_state" == latest_untested ]] || { echo "[awoki] invalid latest OpenCode channel state: $channel_state" >&2; exit 2; }
+fi
+
+if (( materialize )); then
+  tmp="$(mktemp)"
+  jq --arg plugin "$plugin" --arg sdk "$sdk" '.resolved_plugin=$plugin | .resolved_sdk=$sdk' "$manifest" >"$tmp"
+  install -m 0644 "$tmp" "$manifest"
+  rm -f "$tmp"
+fi
+
+printf 'awoki_opencode_compat=ok mode=%s channel_state=%s cli=%s plugin=%s sdk=%s\n' "$mode" "$channel_state" "$cli" "$plugin" "$sdk"

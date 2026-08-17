@@ -1,0 +1,94 @@
+{
+  "schema_version": 2,
+  "updated_at": "2026-08-16",
+  "update_policy": "OpenCode resolves at image build according to the selected latest|safe policy; the resolved CLI/plugin/SDK versions are recorded inside the immutable image. Other critical runtime defaults remain reviewed here.",
+  "critical_runtime": {
+    "opencode_cli": {
+      "package": "opencode-ai",
+      "source": "npm",
+      "build_file": "Dockerfile.opencode",
+      "install_policy": "latest-by-default-or-explicit-safe-version",
+      "default_channel": "latest",
+      "safe_version_source": "operator supplied AWOKI_OPENCODE_SAFE_VERSION / --opencode-safe VERSION",
+      "compatibility_note": "Fresh Awoki OpenCode image builds resolve the current npm latest unless safe mode supplies an exact version. The resolved version is recorded in /usr/local/share/awoki/opencode-runtime.json. Auto-update remains disabled inside a running container."
+    },
+    "opencode_plugin_api": {
+      "package": "@opencode-ai/plugin",
+      "source": "npm",
+      "build_file": ".opencode/plugins/awoki-continuity.ts",
+      "install_policy": "match-resolved-opencode-cli",
+      "config_file": ".opencode/package.json",
+      "compatibility_note": "The image build materializes this package at the exact OpenCode CLI version resolved for that image and runs the runtime compatibility gate."
+    },
+    "opencode_sdk_api": {
+      "package": "@opencode-ai/sdk",
+      "source": "npm",
+      "install_policy": "match-resolved-opencode-cli",
+      "compatibility_note": "The image build installs the SDK at the exact resolved OpenCode CLI version and verifies the three package versions agree."
+    },
+    "lavish_axi": {
+      "package": "lavish-axi",
+      "version": "0.1.43",
+      "source": "npm-via-npx",
+      "build_files": [
+        ".env.example",
+        "docker-compose.opencode.yml",
+        ".opencode/skills/lavish-review/SKILL.md"
+      ],
+      "pin_policy": "exact-default-with-explicit-override",
+      "compatibility_note": "Lavish review launches through npx with this exact default. AWOKI_LAVISH_VERSION may be explicitly overridden for testing, but release validation tracks this default."
+    },
+    "qdrant_server": {
+      "image": "qdrant/qdrant:v1.18.2",
+      "source": "docker",
+      "build_files": [
+        "docker-compose.yml",
+        "docker-compose.opencode.yml"
+      ],
+      "pin_policy": "exact-default-with-explicit-override"
+    },
+    "node_build_runtime": {
+      "image": "node:22-bookworm-slim",
+      "source": "docker",
+      "build_file": "Dockerfile.opencode",
+      "pin_policy": "major-line"
+    },
+    "python_runtime": {
+      "image": "python:3.12-slim-bookworm",
+      "source": "docker",
+      "build_files": [
+        "Dockerfile",
+        "Dockerfile.opencode"
+      ],
+      "pin_policy": "minor-line"
+    },
+    "go_semantics_builder": {
+      "image": "golang:1.26.5-bookworm",
+      "source": "docker",
+      "build_files": [
+        "Dockerfile",
+        "Dockerfile.opencode"
+      ],
+      "pin_policy": "exact-toolchain"
+    }
+  },
+  "python_requirements_source": "requirements.txt",
+  "python_requirements": [
+    "mcp>=1.29,<2",
+    "qdrant-client>=1.15.0",
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.1",
+    "rich>=13.7.0",
+    "orjson>=3.10.0",
+    "httpx>=0.27.0",
+    "openai>=1.40.0",
+    "rank-bm25>=0.2.2",
+    "pytest>=8.2.0",
+    "tree-sitter-language-pack==0.10.0",
+    "tree-sitter==0.25.2",
+    "tree-sitter-c-sharp==0.23.1",
+    "tree-sitter-embedded-template==0.25.0",
+    "tree-sitter-yaml==0.7.2"
+  ],
+  "system_package_policy": "The Dockerfiles are authoritative for direct Debian package names. Exact Debian package versions and pip bootstrap tooling are inherited from the recorded base-image lines rather than silently treated as Awoki API compatibility pins."
+}

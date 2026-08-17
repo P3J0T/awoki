@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="${AWOKI_ROOT:-${HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"
+python_bin="${PYTHON:-python3}"
+quiet=0
+if [[ "${1:-}" == "--quiet" ]]; then
+  quiet=1
+fi
+
+AWOKI_ROOT="$root" \
+HARNESS_ROOT="$root" \
+PYTHONPATH="$root/.harness:$root${PYTHONPATH:+:$PYTHONPATH}" \
+"$python_bin" - "$quiet" <<'PY'
+from __future__ import annotations
+
+import sys
+
+from mcp_runtime import MCPRuntimeError, installed_mcp_version
+
+quiet = bool(int(sys.argv[1]))
+
+try:
+    sdk_version = installed_mcp_version()
+    from mcp.server.fastmcp import FastMCP  # noqa: F401
+    import server  # noqa: F401
+except MCPRuntimeError as exc:
+    raise SystemExit(str(exc)) from exc
+except Exception as exc:
+    raise SystemExit(f"Awoki MCP import preflight failed with mcp {sdk_version}: {exc}") from exc
+
+if not quiet:
+    print(f"[awoki-mcp] preflight passed: mcp={sdk_version}, entrypoint=server.py")
+PY

@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+GLOBAL_ROOT="${AWOKI_GLOBAL_ROOT:-$ROOT/.awoki-global}"
+
+# If running inside the OpenCode SSH container, Compose sets AWOKI_GLOBAL_ROOT=/global.
+# On the host, default to repo-local .awoki-global for the SSH-container workflow.
+case "$GLOBAL_ROOT" in
+  \$\{HOME\}*) GLOBAL_ROOT="$HOME/.awoki" ;;
+esac
+
+mkdir -p \
+  "$ROOT/workspace/notes" \
+  "$ROOT/workspace/projects" \
+  "$ROOT/workspace/corpora/docs" \
+  "$ROOT/workspace/corpora/code" \
+  "$ROOT/workspace/corpora/reports" \
+  "$ROOT/workspace/artifacts" \
+  "$ROOT/workspace/reports" \
+  "$ROOT/workspace/templates" \
+  "$ROOT/workspace/scratch" \
+  "$ROOT/.harness/index" \
+  "$ROOT/.harness/memory" \
+  "$ROOT/.harness/state" \
+  "$ROOT/.harness/artifacts/burp" \
+  "$ROOT/.harness/artifacts/code" \
+  "$ROOT/.harness/artifacts/docs" \
+  "$ROOT/.harness/artifacts/evidence" \
+  "$ROOT/.harness/artifacts/reports" \
+  "$ROOT/.harness/artifacts/private" \
+  "$ROOT/.harness/tmp" \
+  "$ROOT/data/qdrant" \
+  "$ROOT/data/qdrant/collections" \
+  "$ROOT/.opencode-state/share" \
+  "$ROOT/.opencode-state/local-state" \
+  "$ROOT/.opencode-state/config" \
+  "$ROOT/.opencode-state/cache" \
+  "$ROOT/.opencode-state/npm" \
+  "$ROOT/.ssh-container" \
+  "$GLOBAL_ROOT/global" \
+  "$GLOBAL_ROOT/skills" \
+  "$GLOBAL_ROOT/state/registry/context-packs" \
+  "$GLOBAL_ROOT/state/burp/runs" \
+  "$GLOBAL_ROOT/state/knowledge-inbox/sources" \
+  "$GLOBAL_ROOT/state/knowledge-inbox/process-notes"
+
+# Validate the Qdrant bind source on the host without requiring Docker during
+# layout initialization. Runtime launch performs the Docker-side mount probe.
+AWOKI_QDRANT_STORAGE_HOST_ONLY=1 "$ROOT/.harness/bin/prepare-qdrant-storage"
+
+# Prepare host-side OpenCode SSH client material during initialization so the
+# Prepare the host SSH client key pair before any container is started.
+if [[ "${AWOKI_MODE:-}" != "container-opencode" ]]; then
+  "$ROOT/.harness/bin/prepare-opencode-ssh-keys"
+fi
+
+# Local project memory placeholders. Never truncate existing memories.
+touch \
+  "$ROOT/.harness/memory/project.jsonl" \
+  "$ROOT/.harness/memory/findings.jsonl" \
+  "$ROOT/.harness/memory/hypotheses.jsonl" \
+  "$ROOT/.harness/memory/promotion_candidates.jsonl" \
+  "$ROOT/.harness/memory/skill_update_candidates.jsonl" \
+  "$ROOT/.harness/state/session_project.json" \
+  "$ROOT/.harness/state/last_project.json"
+
+# Global placeholders. Never truncate existing memories.
+touch \
+  "$GLOBAL_ROOT/global/memories.jsonl" \
+  "$GLOBAL_ROOT/global/promotion_log.jsonl" \
+  "$GLOBAL_ROOT/state/registry/resources.jsonl" \
+  "$GLOBAL_ROOT/state/registry/tasks.jsonl" \
+  "$GLOBAL_ROOT/state/registry/apps.jsonl" \
+  "$GLOBAL_ROOT/state/knowledge-inbox/inbox.jsonl"
+
+# Human-readable markers so the architecture is inspectable in a fresh install.
+write_once() {
+  local path="$1"
+  shift
+  if [[ ! -f "$path" ]]; then
+    printf '%s\n' "$@" > "$path"
+  fi
+}
+
+write_once "$ROOT/workspace/README.md" \
+  '# Awoki workspace' '' \
+  'Human-facing project workspace. Awoki core state lives in `.harness/`; global state lives in `.awoki-global/` or `/global` in the SSH container.' '' \
+  '- `projects/` — first-class project workspaces (`workspace/projects/<project_id>/`).' \
+  '- `notes/` — human notes you intentionally keep visible.' \
+  '- `corpora/` — documents/code/reports you may index intentionally.' \
+  '- `artifacts/` — project artifacts you choose to stage.' \
+  '- `reports/` — generated human reports.' \
+  '- `templates/` — reusable local templates.' \
+  '- `scratch/` — disposable local scratch space.'
+
+write_once "$ROOT/workspace/notes/README.md" '# Workspace notes' '' 'Human-written notes. Project-specific thoughts go under `workspace/projects/<project_id>/notes/thoughts.md`.'
+write_once "$ROOT/workspace/projects/README.md" '# Projects' '' 'First-class Awoki project workspaces. Create one with `project_create(name)` or `.harness/project.py create NAME`.'
+write_once "$ROOT/workspace/corpora/README.md" '# Corpora' '' 'Documents/code/reports staged for optional indexing. Do not place secrets here.'
+write_once "$ROOT/workspace/artifacts/README.md" '# Workspace artifacts' '' 'Human-facing artifacts. Awoki managed artifacts live under `.harness/artifacts/`.'
+write_once "$ROOT/workspace/reports/README.md" '# Reports' '' 'Generated reports or summaries intended for humans.'
+write_once "$ROOT/workspace/templates/README.md" '# Templates' '' 'Reusable local templates.'
+write_once "$ROOT/workspace/scratch/README.md" '# Scratch' '' 'Disposable scratch space; do not rely on this for durable memory.'
+write_once "$ROOT/.harness/notes.md" \
+  '# Local Awoki notes' '' \
+  'Runtime-only compatibility notes. Prefer `workspace/projects/<project_id>/notes/thoughts.md` for project continuity.'
+
+write_once "$ROOT/.harness/index/README.md" '# Awoki local indexes' '' 'SQLite FTS and local index files are created here at runtime and should not be edited manually.'
+write_once "$ROOT/.harness/artifacts/burp/README.md" '# Burp artifacts' '' 'Local project-related Burp artifacts may be staged here. Global Burp runs live under the global state root.'
+write_once "$ROOT/.harness/artifacts/code/README.md" '# Code artifacts' '' 'Static-analysis or code-indexing artifacts.'
+write_once "$ROOT/.harness/artifacts/docs/README.md" '# Document artifacts' '' 'Document artifacts intentionally staged for Awoki.'
+write_once "$ROOT/.harness/artifacts/evidence/README.md" '# Evidence artifacts' '' 'Evidence files referenced by findings. Keep large/raw sensitive evidence out of broad RAG indexes.'
+write_once "$ROOT/.harness/artifacts/reports/README.md" '# Artifact reports' '' 'Machine-generated artifact summaries.'
+
+write_once "$GLOBAL_ROOT/README.md" \
+  '# Awoki global state' '' \
+  'Repo-local global state for the OpenCode-over-SSH workflow. Inside the container this is mounted at `/global`.' '' \
+  '- `global/` — reusable global memories and logs.' \
+  '- `skills/` — optional global skills.' \
+  '- `state/burp/runs/` — global Burp evidence runs.' \
+  '- `state/registry/` — resource registry and context packs.'
+
+
+cat > "$ROOT/.harness/state/layout_initialized.json" <<EOF
+{
+  "status": "initialized",
+  "project_root": "$ROOT",
+  "global_root": "$GLOBAL_ROOT",
+  "initialized_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
+echo "Awoki filesystem layout initialized"
+echo "PROJECT_ROOT=$ROOT"
+echo "GLOBAL_ROOT=$GLOBAL_ROOT"
+echo "MARKER=$ROOT/.harness/state/layout_initialized.json"

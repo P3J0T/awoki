@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="${AWOKI_ROOT:-${HARNESS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"
+"$root/.harness/bin/code-parser-check" >/dev/null
+PYTHONPATH="$root/.harness:$root${PYTHONPATH:+:$PYTHONPATH}" python3 - "$root" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+from code_search.evaluation import run_suite
+from harness_core import HarnessPaths
+
+root = Path(sys.argv[1]).resolve()
+paths = HarnessPaths(root=root, global_root=root / ".harness" / "state" / "evaluation-global")
+suites_root = root / ".harness" / "evaluation" / "code_search" / "suites"
+reports = []
+failures = []
+for suite_name in ("multilingual", "live-qdrant"):
+    result = run_suite(paths, suites_root / f"{suite_name}.jsonl")
+    reports.append({
+        "suite": suite_name,
+        "suite_sha256": result["suite_sha256"],
+        "engine_version": result["engine_version"],
+        "fixture": result["fixture"],
+        "summary": result["summary"],
+        "acceptance": result["acceptance"],
+    })
+    if not result["acceptance"]["passed"]:
+        failures.append({"suite": suite_name, "results": result["results"]})
+print(json.dumps({
+    "status": "failed" if failures else "ok",
+    "suites": reports,
+    "failures": failures,
+}, indent=2, sort_keys=True))
+if failures:
+    raise SystemExit("Awoki structural code-search runtime golden gate failed")
+PY

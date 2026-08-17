@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-${HARNESS_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+COMPOSE="$ROOT/docker-compose.yml"
+"$ROOT/.harness/bin/awoki-backup" lock-check >/dev/null
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker is required for Awoki mcp-docker" >&2
+  exit 127
+fi
+
+if ! docker compose version >/dev/null 2>&1; then
+  echo "docker compose plugin is required for Awoki" >&2
+  exit 127
+fi
+
+# All operational logs go to stderr so MCP stdio on stdout stays clean.
+if [[ "${AWOKI_FORCE_BUILD:-0}" == "1" ]] || ! docker image inspect awoki-mcp:latest >/dev/null 2>&1; then
+  echo "[awoki] building MCP image" >&2
+  docker compose -f "$COMPOSE" build awoki-mcp >/dev/null
+else
+  echo "[awoki] using existing MCP image awoki-mcp:latest" >&2
+fi
+
+echo "[awoki] starting qdrant" >&2
+docker compose -f "$COMPOSE" up -d qdrant >/dev/null
+"$ROOT/.harness/bin/wait-qdrant"
+
+echo "[awoki] starting MCP over stdio" >&2
+exec docker compose -f "$COMPOSE" run --rm -T awoki-mcp

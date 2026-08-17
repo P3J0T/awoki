@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+TIMEOUT="${AWOKI_QDRANT_WAIT_SECONDS:-90}"
+COMPOSE_FILE="${AWOKI_QDRANT_WAIT_COMPOSE_FILE:-}"
+PROBE_SERVICE="${AWOKI_QDRANT_WAIT_SERVICE:-}"
+
+# OpenCode-over-SSH consumes Qdrant through the internal Compose network. When
+# the caller provides both a Compose file and a probe service, verify exactly
+# that path instead of depending on optional host-port publication.
+if [[ -n "$COMPOSE_FILE" || -n "$PROBE_SERVICE" ]]; then
+  [[ -n "$COMPOSE_FILE" ]] || {
+    echo "[awoki] AWOKI_QDRANT_WAIT_COMPOSE_FILE is required for Docker-network readiness" >&2
+    exit 2
+  }
+  [[ -n "$PROBE_SERVICE" ]] || {
+    echo "[awoki] AWOKI_QDRANT_WAIT_SERVICE is required for Docker-network readiness" >&2
+    exit 2
+  }
+
+  case "$COMPOSE_FILE" in
+    /*) ;;
+    *) COMPOSE_FILE="$ROOT/$COMPOSE_FILE" ;;
+  esac
+
+  command -v docker >/dev/null 2>&1 || {
+    echo "[awoki] docker is unavailable while waiting for Qdrant" >&2
+    exit 1
+  }
+  docker compose version >/dev/null 2>&1 || {
+    echo "[awoki] docker compose is unavailable while waiting for Qdrant" >&2
+    exit 1
+  }
+  [[ -f "$COMPOSE_FILE" ]] || {
+    echo "[awoki] compose file does not exist: $COMPOSE_FILE" >&2
+    exit 1
+  }
+
+  echo "[awoki] waiting for qdrant on the internal Docker network (timeout ${TIMEOUT}s)" >&2
+
+  if docker compose -f "$COMPOSE_FILE" run \
+    --rm \
+    --no-deps \
+    --entrypoint python3 \
+    "$PROBE_SERVICE" \
+    - "$TIMEOUT" <<'PY'
+import sys
+import time
+import urllib.request
+
+timeout = int(sys.argv[1])
+deadline = time.monotonic() + timeout
+next_notice = time.monotonic() + 10
+base = "http://qdrant:6333"
+
+while time.monotonic() < deadline:
+    for path in ("/readyz", "/"):
+        try:
+            with urllib.request.urlopen(base + path, timeout=3) as response:
+                if 200 <= response.status < 500:
+                    raise SystemExit(0)
+        except Exception:
+            pass
+
+    now = time.monotonic()
+    if now >= next_notice:
+        remaining = max(0, int(deadline - now))
+        print(
+            f"[awoki] still waiting for qdrant on Docker network "
+            f"({remaining}s remaining)",
+            file=sys.stderr,
+        )
+        next_notice = now + 10
+    time.sleep(2)
+
+raise SystemExit(1)
+PY
+  then
+    echo "[awoki] qdrant is ready on Docker network at http://qdrant:6333" >&2
+    exit 0
+  fi
+
+  echo "[awoki] qdrant did not become ready on Docker network at http://qdrant:6333 within ${TIMEOUT}s" >&2
+  docker compose -f "$COMPOSE_FILE" logs --tail=100 qdrant >&2 || true
+  exit 1
+fi
+
+# Generic/host-mode fallback. This remains for the host OpenCode deployment and
+# explicit operator overrides; the SSH launcher above does not use this path.
+URL="${AWOKI_QDRANT_HOST_URL:-http://127.0.0.1:${AWOKI_QDRANT_HTTP_PORT:-6333}}"
+END=$((SECONDS + TIMEOUT))
+
+# Qdrant exposes /readyz on current releases. Fall back to / if needed.
+while (( SECONDS < END )); do
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsS "$URL/readyz" >/dev/null 2>&1 || curl -fsS "$URL/" >/dev/null 2>&1; then
+      echo "[awoki] qdrant is ready at $URL" >&2
+      exit 0
+    fi
+  elif command -v python3 >/dev/null 2>&1; then
+    if python3 - "$URL" <<'PY' >/dev/null 2>&1
+import sys, urllib.request
+base=sys.argv[1].rstrip('/')
+for path in ('/readyz','/'):
+    try:
+        with urllib.request.urlopen(base+path, timeout=2) as r:
+            if 200 <= r.status < 500:
+                sys.exit(0)
+    except Exception:
+        pass
+sys.exit(1)
+PY
+    then
+      echo "[awoki] qdrant is ready at $URL" >&2
+      exit 0
+    fi
+  else
+    host_port="${URL#http://}"
+    host_port="${host_port#https://}"
+    host="${host_port%%:*}"
+    port="${host_port#*:}"
+    port="${port%%/*}"
+    if (exec 3<>"/dev/tcp/$host/$port") >/dev/null 2>&1; then
+      echo "[awoki] qdrant TCP port is open at $host:$port" >&2
+      exit 0
+    fi
+  fi
+  sleep 2
+done
+
+echo "[awoki] qdrant did not become ready at $URL within ${TIMEOUT}s" >&2
+exit 1

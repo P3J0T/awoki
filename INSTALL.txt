@@ -1,0 +1,340 @@
+Awoki Installation Guide — v0.1.6
+
+This is the preferred Docker/OpenCode-over-SSH installation.
+For the conceptual overview and first-use workflow, read README.md first.
+For dense operational detail, see docs/OPERATOR_REFERENCE.md.
+
+Topology
+
+  host
+    -> SSH -> awoki-opencode-ssh container (OpenCode + Awoki MCP)
+    -> optional Burp MCP on host loopback
+    -> optional remote embedding/reranker endpoints
+
+  Docker network
+    -> qdrant
+    -> awoki-opencode-ssh
+
+No Docker socket is mounted into the OpenCode container.
+No Docker-in-Docker or privileged mode is required.
+
+Requirements
+
+Install on the host:
+
+  Docker Desktop / Docker Engine
+  Docker Compose v2
+  git
+  ssh + ssh-keygen (OpenSSH client tools)
+  make
+  Python 3.12+
+
+Check:
+
+  docker --version
+  docker compose version
+  git --version
+  ssh -V
+  command -v ssh-keygen
+  python3 --version
+
+Fresh install
+
+1. Enter the writable Awoki Git checkout.
+
+2. Create the local environment file:
+
+  cp .env.example .env
+
+Semantic retrieval is optional. Configure AWOKI_EMBEDDING_* only when you intend
+to authorize remote embeddings/vector materialization. Configure AWOKI_RERANK_*
+only when you intend to use a remote reranker.
+
+3. Initialize runtime directories and SSH material BEFORE Docker starts:
+
+  ./init-awoki.sh
+
+This creates the ignored runtime layout, including workspace/, data/,
+.ssh-container/, .opencode-state/, and .harness/state/. The SSH client key pair
+is generated on the host. At runtime Awoki injects only the validated public key
+into the container; the private key remains host-only.
+
+4. Run host preflight:
+
+  make dependencies-check
+  make dev-preflight
+
+5. Build/start the preferred OpenCode-over-SSH runtime:
+
+  make install-opencode-ssh
+
+By default a fresh image resolves the current OpenCode CLI and aligns the local
+OpenCode plugin/SDK packages to that exact resolved version. This is
+"latest / untested" until your own validation proves the stack acceptable.
+The running container does not silently auto-update.
+
+6. Validate the running OpenCode runtime:
+
+  make opencode-runtime-check
+
+7. Connect using the SSH command printed by the installer. Default:
+
+  ssh -i .ssh-container/id_ed25519 -p 2222 op@127.0.0.1
+
+8. Inside the container, start or reattach the recommended tmux session, then run
+OpenCode:
+
+  cd /awoki
+  tmux new -A -s awoki
+  opencode
+
+Do not use a custom --config path for normal operation. /awoki/opencode.jsonc is
+the project configuration and loads Awoki through the reviewed MCP launcher.
+
+Why tmux
+
+  - tmux is recommended, not required by Awoki.
+  - it keeps the OpenCode terminal alive across SSH disconnects;
+  - `tmux new -A -s awoki` creates the named session or reattaches to it;
+  - detach without stopping OpenCode with Ctrl-b d or Ctrl-a d;
+  - tmux sessions do NOT survive container recreation.
+
+Daily start / reconnect
+
+From the host:
+
+  make opencode-ssh-up
+  make opencode-runtime-check
+  ssh -i .ssh-container/id_ed25519 -p 2222 op@127.0.0.1
+
+Inside the container:
+
+  cd /awoki
+  tmux new -A -s awoki
+
+If OpenCode is not already running in the attached tmux session:
+
+  opencode
+
+If SSH drops, reconnect and repeat only the SSH + tmux commands. Do not restart or
+recreate the container merely to recover the terminal.
+
+A practical tmux layout is:
+
+  window 1: OpenCode
+  window 2: shell / exact searches / repository inspection
+  window 3: tests or long-running commands
+  window 4: logs
+
+Stop the deployment only when you actually want the container/Qdrant services down:
+
+  make opencode-ssh-down
+
+After `make opencode-recreate`, the old tmux/OpenCode processes are gone. SSH into
+the new container, run `tmux new -A -s awoki`, and start `opencode` again. Durable
+Awoki/project/OpenCode state lives on the configured host mounts; tmux itself is only
+a process/session wrapper.
+
+Rebuild after an Awoki update
+
+Latest / untested OpenCode stack:
+
+  make opencode-recreate \
+    OPENCODE_RECREATE_ARGS="--validate --no-cache --opencode-latest"
+
+Operator-selected safe version:
+
+  make opencode-recreate \
+    OPENCODE_RECREATE_ARGS="--validate --no-cache --opencode-safe <VERSION>"
+
+Safe mode means "use exactly the version I selected". Awoki does not automatically
+promote any version to known-good.
+
+Create a first project
+
+From the writable host checkout:
+
+  python3 .harness/project.py create review1
+
+Clone a target repository into the managed project:
+
+  git clone <repository-url> workspace/projects/review1/repo/target
+
+Register that exact root:
+
+  python3 .harness/project.py repo-add \
+    --default \
+    review1 \
+    target \
+    repo/target
+
+Inside OpenCode:
+
+  Resume project review1.
+
+or precisely:
+
+  project_open(name="review1", create_if_missing=false)
+  project_repo_list(name="review1")
+
+Prepare repository state
+
+Local/structural only (no remote embedding authorization):
+
+  repository_prepare_start(
+    name="review1",
+    repo="target",
+    mode="local",
+    resume_goal="continue the review after LOCAL_READY"
+  )
+
+Full semantic readiness (explicitly authorizes configured semantic materialization
+for this managed source):
+
+  repository_prepare_start(
+    name="review1",
+    repo="target",
+    mode="full",
+    resume_goal="continue the review after FULL_READY"
+  )
+
+The returned rpr_ job is detached. Do not have the model tight-poll it. Check later
+with repository_prepare_status or use the bounded continuation mechanism.
+
+Start the first real review
+
+Once the repository is LOCAL_READY (or FULL_READY when semantic materialization was
+explicitly requested), talk to OpenCode normally. For example:
+
+  Review authentication in this repository. Trace credential handling into
+  authorization, identify configuration-dependent reachability and fail-open/fail-closed
+  behavior, and distinguish verified source facts from hypotheses or deployment gaps.
+
+For a multi-step review, the agent should keep a small outcome-oriented OpenCode TODO
+working set rather than copying every intermediate thought. Awoki mirrors the active
+work and useful durable evidence so automatic OpenCode compaction can continue from
+project state instead of treating chat history as canonical. You normally do not need
+to do anything special when compaction happens.
+
+Use source tools by intent:
+
+  conceptual/architectural discovery  -> Awoki codebase_search
+  simple known string/symbol           -> OpenCode Grep
+  structured exhaustive exact search   -> Awoki code_exact_search
+  stronger materialized exhaustive job -> Awoki code_text_search
+
+OpenCode version policy
+
+Default fresh build:
+
+  latest / untested
+
+Explicit last-known-good rollback:
+
+  make opencode-recreate \
+    OPENCODE_RECREATE_ARGS="--validate --no-cache --opencode-safe <VERSION>"
+
+Normal make opencode-ssh-up does NOT resolve a new OpenCode release. It starts the
+already built image.
+
+Environment notes
+
+The stock .env.example keeps:
+
+  AWOKI_RERANK_ENABLED=0
+  AWOKI_CODE_RERANK_TIMEOUT_SECONDS=
+
+An empty AWOKI_CODE_RERANK_TIMEOUT_SECONDS inherits AWOKI_RERANK_TIMEOUT_SECONDS.
+
+After changing retrieval/Qdrant/reranker configuration, recreate the OpenCode SSH
+runtime and start a fresh OpenCode process. Do not manually source
+/run/awoki/runtime.env.
+
+Useful checks
+
+  make doctor
+  make dependencies-check
+  make dev-preflight
+  make opencode-runtime-check
+  make runtime-config
+
+Synthetic remote-backend diagnostics:
+
+  make embedding-benchmark
+  make reranker-benchmark
+
+Validate source/harness:
+
+  make validate
+  make code-search-eval
+
+Troubleshooting
+
+1. Dirty Git checkout during an update
+
+  git status --short
+
+Do not overwrite local changes blindly. Commit/stash/restore them intentionally.
+Awoki's release bundle install instructions assume a clean worktree.
+
+2. Invalid opencode.jsonc
+
+  python3 .harness/validate.py
+
+If the local opencode.jsonc modification is not needed and the bundled copy is the
+wanted configuration:
+
+  git restore opencode.jsonc
+
+Then validate/recreate again.
+
+3. SSH port already in use
+
+Set in .env:
+
+  AWOKI_OPENCODE_SSH_PORT=2224
+
+Then:
+
+  make opencode-ssh-up
+
+Connect using the new port.
+
+4. SSH public-key failure
+
+Stop the OpenCode SSH runtime, preserve anything you need, then regenerate only the
+local SSH material:
+
+  make opencode-ssh-down
+  rm -rf .ssh-container
+  ./init-awoki.sh
+  make opencode-ssh-up
+
+5. Runtime logs
+
+  docker compose -f docker-compose.opencode.yml logs --tail=200 awoki-opencode-ssh
+  docker compose -f docker-compose.opencode.yml logs --tail=200 qdrant
+
+Awoki MCP local stderr is also mirrored to:
+
+  .harness/state/mcp-local.stderr.log
+
+Security note
+
+Awoki filters provider credentials from repository-facing Git/search subprocesses,
+but this is defense in depth, not a same-user sandbox. Do not execute hostile target
+code inside a credential-bearing OpenCode container. Use a separate credential-free
+sandbox for untrusted execution.
+
+Backups
+
+Portable:
+
+  make backup-portable
+
+Full (includes derived index/Qdrant state and therefore has stricter compatibility
+requirements):
+
+  make backup-full
+
+See docs/BACKUP_RESTORE.md.

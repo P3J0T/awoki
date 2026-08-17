@@ -1,0 +1,289 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF_USAGE'
+Usage:
+  awoki-runtime-env --check
+  awoki-runtime-env --print-config
+  awoki-runtime-env [--profile base|qdrant|retrieval|burp|lavish|mcp|all] -- COMMAND [ARG ...]
+  awoki-runtime-env [--profile base|qdrant|retrieval|burp|lavish|mcp|all] COMMAND [ARG ...]
+
+Run an explicit diagnostic command with an allowlisted subset of the runtime
+configuration captured by the OpenCode SSH entrypoint. The child starts from a
+clean environment so stale SSH exports do not override the effective MCP values.
+
+Profiles:
+  base       non-secret Awoki/Harness paths and mode only (default)
+  qdrant     base + Qdrant/code-search settings; no embedding/reranker API-key variables
+  retrieval  qdrant + embedding/reranker settings, including configured API keys
+  burp       base + Awoki Burp-adapter endpoint/timeout settings; no retrieval API keys
+  lavish     base + local Lavish endpoint/version/state settings; no retrieval API keys
+  mcp        base + Qdrant/retrieval/Burp settings required by Awoki MCP; secret-bearing
+  all        every variable from the runtime snapshot, including configured API keys
+
+Endpoint URLs are passed verbatim to command profiles and therefore should not
+contain embedded credentials. The retrieval/all profiles expose configured API
+credentials to the child process. Use them only with trusted diagnostics; never
+wrap repository-controlled code, Git/build/test commands, or arbitrary downloaded
+tools with a secret-bearing profile. Normal OpenCode skills should use MCP tools.
+
+Important: profiles minimize *ambient environment inheritance*; they are not a
+sandbox. In the current stdio-MCP SSH design, /run/awoki/runtime.env must remain
+readable by the runtime user so mcp-auto can restore MCP credentials. Any hostile
+process already running as that same user could deliberately read the snapshot.
+Do not execute untrusted repository/tool code in a credential-bearing container.
+
+--print-config never prints API-key values and sanitizes URLs before display.
+Set AWOKI_RUNTIME_ENV_FILE only for tests or deliberate non-default layouts.
+EOF_USAGE
+}
+
+runtime_env_override="${AWOKI_RUNTIME_ENV_FILE:-}"
+runtime_env_file="${runtime_env_override:-/run/awoki/runtime.env}"
+profile="base"
+
+fail() {
+  echo "[awoki] $*" >&2
+  exit 1
+}
+
+validate_runtime_env() {
+  [[ -e "$runtime_env_file" ]] || fail "runtime environment snapshot not found: $runtime_env_file"
+  [[ -f "$runtime_env_file" ]] || fail "runtime environment snapshot is not a regular file: $runtime_env_file"
+  [[ ! -L "$runtime_env_file" ]] || fail "refusing symlink runtime environment file: $runtime_env_file"
+  [[ -r "$runtime_env_file" ]] || fail "runtime environment snapshot is not readable: $runtime_env_file"
+
+  if [[ -z "$runtime_env_override" && "$runtime_env_file" == "/run/awoki/runtime.env" ]]; then
+    local dir owner_uid mode group_digit other_digit
+    dir="$(dirname "$runtime_env_file")"
+    [[ ! -L "$dir" ]] || fail "refusing symlink runtime environment directory: $dir"
+
+    owner_uid="$(stat -c '%u' "$runtime_env_file" 2>/dev/null || true)"
+    mode="$(stat -c '%a' "$runtime_env_file" 2>/dev/null || true)"
+    [[ "$owner_uid" == "0" ]] || fail "runtime environment snapshot must be root-owned: $runtime_env_file"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || fail "could not validate runtime environment snapshot mode: $runtime_env_file"
+    group_digit="${mode: -2:1}"
+    other_digit="${mode: -1}"
+    (( (10#$group_digit & 2) == 0 )) || fail "runtime environment snapshot must not be group-writable: $runtime_env_file"
+    (( 10#$other_digit == 0 )) || fail "runtime environment snapshot must not be world-accessible: $runtime_env_file"
+
+    owner_uid="$(stat -c '%u' "$dir" 2>/dev/null || true)"
+    mode="$(stat -c '%a' "$dir" 2>/dev/null || true)"
+    [[ "$owner_uid" == "0" ]] || fail "runtime environment directory must be root-owned: $dir"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || fail "could not validate runtime environment directory mode: $dir"
+    group_digit="${mode: -2:1}"
+    other_digit="${mode: -1}"
+    (( (10#$group_digit & 2) == 0 )) || fail "runtime environment directory must not be group-writable: $dir"
+    (( (10#$other_digit & 2) == 0 )) || fail "runtime environment directory must not be world-writable: $dir"
+  fi
+}
+
+minimal_env=(
+  "HOME=/home/op"
+  "USER=op"
+  "LOGNAME=op"
+  "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  "SHELL=/bin/bash"
+)
+[[ -n "${TERM:-}" ]] && minimal_env+=("TERM=$TERM")
+[[ -n "${LANG:-}" ]] && minimal_env+=("LANG=$LANG")
+[[ -n "${LC_ALL:-}" ]] && minimal_env+=("LC_ALL=$LC_ALL")
+
+base_names=(
+  AWOKI_ROOT AWOKI_MODE AWOKI_PROJECT_ID AWOKI_GLOBAL_ROOT AWOKI_GLOBAL_SKILLS_DIR
+  HARNESS_ROOT HARNESS_MODE HARNESS_PROJECT_ID HARNESS_GLOBAL_ROOT HARNESS_GLOBAL_SKILLS_DIR
+)
+qdrant_names=(
+  AWOKI_QDRANT_URL AWOKI_QDRANT_HOST_URL AWOKI_QDRANT_CONTAINER_URL QDRANT_URL
+  AWOKI_QDRANT_COLLECTION AWOKI_QDRANT_RECREATE_ON_DIM_MISMATCH
+  AWOKI_CODE_QDRANT_COLLECTION AWOKI_CODE_PEEK_MAX_CHARS AWOKI_CODE_CONTEXT_MAX_CHARS
+  AWOKI_CODE_FULL_MAX_CHARS AWOKI_CODE_RRF_K AWOKI_CODE_QDRANT_TIMEOUT_SECONDS
+  AWOKI_CODE_RERANK_TIMEOUT_SECONDS QDRANT_COLLECTION_PROJECT QDRANT_COLLECTION_GLOBAL
+)
+retrieval_names=(
+  AWOKI_EMBEDDING_PROVIDER AWOKI_EMBEDDING_MODEL AWOKI_EMBEDDING_DEPLOYMENT_ID
+  AWOKI_EMBEDDING_BASE_URL AWOKI_EMBEDDING_API_KEY AWOKI_EMBEDDING_BATCH_SIZE
+  AWOKI_EMBEDDING_NORMALIZE AWOKI_EMBEDDING_TIMEOUT_SECONDS AWOKI_EMBEDDING_MAX_RETRIES
+  AWOKI_EMBEDDING_QUERY_TIMEOUT_SECONDS AWOKI_EMBEDDING_QUERY_MAX_RETRIES
+  AWOKI_EMBEDDING_WORKER_MAX_RETRIES AWOKI_EMBEDDING_RETRY_BACKOFF_SECONDS
+  AWOKI_EMBEDDING_ADAPTIVE_MIN_BATCH_SIZE AWOKI_VECTOR_SIZE
+  AWOKI_QUERY_PREFIX AWOKI_DOCUMENT_PREFIX AWOKI_ALLOW_HASH_EMBEDDINGS
+  AWOKI_RERANK_ENABLED AWOKI_RERANK_PROVIDER AWOKI_RERANK_URL AWOKI_RERANK_MODEL
+  AWOKI_RERANK_API_KEY AWOKI_RERANK_API_KEY_ENV AWOKI_RERANK_TIMEOUT_SECONDS
+  AWOKI_RERANK_CANDIDATES AWOKI_RERANK_TOP_N AWOKI_RERANK_MAX_DOCUMENT_CHARS AWOKI_RERANK_FAIL_MODE
+)
+burp_names=(
+  AWOKI_BURP_TARGET AWOKI_BURP_HOST_URL AWOKI_BURP_CONTAINER_URL AWOKI_BURP_URL
+  AWOKI_BURP_MCP_URL AWOKI_BURP_TIMEOUT AWOKI_BURP_CALL_TIMEOUT
+)
+lavish_names=(
+  AWOKI_LAVISH_PORT AWOKI_LAVISH_VERSION LAVISH_AXI_PORT LAVISH_AXI_HOST
+  LAVISH_AXI_LINK_HOST LAVISH_AXI_ALLOWED_HOSTS LAVISH_AXI_NO_OPEN LAVISH_AXI_STATE_DIR
+)
+
+run_with_profile() {
+  local selected_names=()
+  case "$profile" in
+    base) selected_names=("${base_names[@]}") ;;
+    qdrant) selected_names=("${base_names[@]}" "${qdrant_names[@]}") ;;
+    retrieval) selected_names=("${base_names[@]}" "${qdrant_names[@]}" "${retrieval_names[@]}") ;;
+    burp) selected_names=("${base_names[@]}" "${burp_names[@]}") ;;
+    lavish) selected_names=("${base_names[@]}" "${lavish_names[@]}") ;;
+    mcp) selected_names=("${base_names[@]}" "${qdrant_names[@]}" "${retrieval_names[@]}" "${burp_names[@]}") ;;
+    all) selected_names=("${base_names[@]}" "${qdrant_names[@]}" "${retrieval_names[@]}" "${burp_names[@]}" "${lavish_names[@]}") ;;
+    *) fail "unknown runtime environment profile: $profile" ;;
+  esac
+
+  local names_blob
+  names_blob="$(printf '%s\n' "${selected_names[@]}")"
+  exec /usr/bin/env -i "${minimal_env[@]}" \
+    AWOKI_RUNTIME_ENV_FILE="$runtime_env_file" \
+    AWOKI_RUNTIME_ENV_PROFILE="$profile" \
+    AWOKI_RUNTIME_ENV_NAMES="$names_blob" \
+    /bin/bash -c '
+      set -euo pipefail
+      runtime_env_file="$1"
+      shift
+      [[ -f "$runtime_env_file" && ! -L "$runtime_env_file" && -r "$runtime_env_file" ]]
+      # shellcheck disable=SC1090
+      source "$runtime_env_file"
+      selected=()
+      while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        if declare -p "$name" >/dev/null 2>&1; then
+          selected+=("$name=${!name}")
+        fi
+      done <<<"${AWOKI_RUNTIME_ENV_NAMES:-}"
+      exec /usr/bin/env -i \
+        HOME="$HOME" USER="$USER" LOGNAME="$LOGNAME" PATH="$PATH" SHELL="$SHELL" \
+        ${TERM:+TERM="$TERM"} ${LANG:+LANG="$LANG"} ${LC_ALL:+LC_ALL="$LC_ALL"} \
+        AWOKI_RUNTIME_ENV_ACTIVE=1 AWOKI_RUNTIME_ENV_PROFILE="$AWOKI_RUNTIME_ENV_PROFILE" \
+        "${selected[@]}" "$@"
+    ' awoki-runtime-env "$runtime_env_file" "$@"
+}
+
+print_config() {
+  /usr/bin/env -i "${minimal_env[@]}" \
+    AWOKI_RUNTIME_ENV_FILE="$runtime_env_file" \
+    /bin/bash -c '
+      set -euo pipefail
+      runtime_env_file="$1"
+      source "$runtime_env_file"
+
+      print_value() {
+        local name="$1"
+        printf "%s=%s\n" "$name" "${!name-<unset>}"
+      }
+      print_secret_state() {
+        local name="$1"
+        if [[ -n "${!name-}" ]]; then
+          printf "%s=<configured>\n" "$name"
+        else
+          printf "%s=<unset>\n" "$name"
+        fi
+      }
+      print_url() {
+        local name="$1" value="${!1-}"
+        if [[ -z "$value" ]]; then
+          printf "%s=<unset>\n" "$name"
+          return
+        fi
+        python3 - "$name" "$value" <<"PY"
+import sys
+from urllib.parse import urlsplit, urlunsplit
+name, value = sys.argv[1], sys.argv[2]
+try:
+    parts = urlsplit(value)
+    if not parts.scheme or not parts.netloc:
+        print(f"{name}=<configured-nonstandard-url>")
+    else:
+        host = parts.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parts.port}" if parts.port is not None else ""
+        safe = urlunsplit((parts.scheme, host + port, parts.path, "", ""))
+        print(f"{name}={safe}")
+except Exception:
+    print(f"{name}=<configured-unparseable-url>")
+PY
+      }
+
+      printf "runtime_env_file=%s\n" "$runtime_env_file"
+      printf "runtime_env_snapshot_mtime=%s\n" "$(stat -c '%y' "$runtime_env_file" 2>/dev/null || printf unknown)"
+      printf "credential_isolation=%s\n" "ambient-environment-minimization-not-sandbox"
+      printf "runtime_user_can_read_snapshot=%s\n" "yes"
+      for name in AWOKI_MODE AWOKI_ROOT AWOKI_PROJECT_ID AWOKI_GLOBAL_ROOT AWOKI_GLOBAL_SKILLS_DIR; do
+        print_value "$name"
+      done
+      for name in AWOKI_QDRANT_URL AWOKI_QDRANT_HOST_URL AWOKI_QDRANT_CONTAINER_URL AWOKI_EMBEDDING_BASE_URL AWOKI_RERANK_URL AWOKI_BURP_HOST_URL AWOKI_BURP_CONTAINER_URL AWOKI_BURP_URL AWOKI_BURP_MCP_URL; do
+        print_url "$name"
+      done
+      for name in \
+        AWOKI_QDRANT_COLLECTION AWOKI_CODE_QDRANT_COLLECTION AWOKI_CODE_QDRANT_TIMEOUT_SECONDS \
+        AWOKI_EMBEDDING_PROVIDER AWOKI_EMBEDDING_MODEL AWOKI_EMBEDDING_DEPLOYMENT_ID \
+        AWOKI_EMBEDDING_BATCH_SIZE AWOKI_EMBEDDING_NORMALIZE AWOKI_EMBEDDING_TIMEOUT_SECONDS \
+        AWOKI_EMBEDDING_MAX_RETRIES AWOKI_EMBEDDING_QUERY_TIMEOUT_SECONDS \
+        AWOKI_EMBEDDING_QUERY_MAX_RETRIES AWOKI_EMBEDDING_WORKER_MAX_RETRIES \
+        AWOKI_EMBEDDING_RETRY_BACKOFF_SECONDS AWOKI_EMBEDDING_ADAPTIVE_MIN_BATCH_SIZE \
+        AWOKI_VECTOR_SIZE AWOKI_RERANK_ENABLED \
+        AWOKI_RERANK_PROVIDER AWOKI_RERANK_MODEL AWOKI_RERANK_TIMEOUT_SECONDS \
+        AWOKI_RERANK_CANDIDATES AWOKI_RERANK_TOP_N AWOKI_RERANK_FAIL_MODE \
+        AWOKI_BURP_TARGET AWOKI_BURP_TIMEOUT AWOKI_BURP_CALL_TIMEOUT \
+        AWOKI_LAVISH_PORT AWOKI_LAVISH_VERSION LAVISH_AXI_STATE_DIR; do
+        print_value "$name"
+      done
+      print_secret_state AWOKI_EMBEDDING_API_KEY
+      print_secret_state AWOKI_RERANK_API_KEY
+      if [[ -n "${AWOKI_RERANK_API_KEY_ENV-}" ]]; then
+        printf "AWOKI_RERANK_API_KEY_ENV=%s\n" "$AWOKI_RERANK_API_KEY_ENV"
+      else
+        printf "AWOKI_RERANK_API_KEY_ENV=<unset>\n"
+      fi
+    ' awoki-runtime-env "$runtime_env_file"
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+validate_runtime_env
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --check)
+      echo "[awoki] runtime environment snapshot ok: $runtime_env_file"
+      exit 0
+      ;;
+    --print-config)
+      print_config
+      exit 0
+      ;;
+    --profile)
+      [[ $# -ge 2 ]] || fail "--profile requires a value"
+      profile="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -* )
+      fail "unknown option: $1"
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+[[ "$#" -gt 0 ]] || {
+  usage >&2
+  exit 2
+}
+run_with_profile "$@"

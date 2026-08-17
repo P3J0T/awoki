@@ -1,0 +1,120 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+junit*.xml
+htmlcov/
+build/
+dist/
+site/
+pip-wheel-metadata/
+*.egg
+*.egg-info/
+
+# JavaScript / TypeScript tooling
+node_modules/
+.bun/
+.npm/
+.pnpm-store/
+.yarn/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime databases, process files, logs, and temporary output
+/data/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.log
+*.pid
+*.pid.lock
+*.sock
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+core
+core.*
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+.envrc
+.direnv/
+*.env.generated
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.kdbx
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Awoki runtime workspace
+# This entire tree is local user/project data. It can contain checked-out target
+# repositories and their source code, notes, continuity memory, Burp evidence,
+# reports, corpora, artifacts, indexes, and scratch files. Never commit it.
+/workspace/
+
+# Harness runtime state, legacy compatibility memory, and indexes
+# Awoki source under .harness remains tracked; only mutable data is excluded.
+/.harness/tmp/
+/.harness/memory/
+/.harness/notes.md
+/.harness/index/*
+!/.harness/index/README.md
+/.harness/state/*
+!/.harness/state/README.md
+
+# Generated harness artifacts; retain only tracked directory documentation.
+/.harness/artifacts/**/*
+!/.harness/artifacts/**/
+!/.harness/artifacts/**/README.md
+
+# Awoki credential material if someone overrides the store into the repo
+/secrets/
+**/credentials/values/
+**/credentials/exports/
+
+# OpenCode-over-SSH container state
+/.opencode-state/
+/.ssh-container/
+/.awoki-global/
+
+# OS/editor
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*~
+
+# Generated structural code-search evaluation reports
+/.harness/evaluation/code_search/reports/*.json
+!/.harness/evaluation/code_search/reports/.gitkeep

@@ -1,0 +1,152 @@
+name: ${AWOKI_COMPOSE_PROJECT_NAME:-awoki}
+
+networks:
+  awoki-data:
+    name: ${AWOKI_COMPOSE_PROJECT_NAME:-awoki}-data
+    driver: bridge
+    internal: true
+  awoki-egress:
+    name: ${AWOKI_COMPOSE_PROJECT_NAME:-awoki}-egress
+    driver: bridge
+
+volumes:
+  awoki_ssh_host_keys:
+  awoki_nvim_share:
+  awoki_nvim_state:
+
+services:
+  qdrant:
+    image: ${AWOKI_QDRANT_IMAGE:-qdrant/qdrant:v1.18.2}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${AWOKI_QDRANT_HTTP_PORT:-6333}:6333"
+      - "127.0.0.1:${AWOKI_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    networks:
+      - awoki-data
+
+  awoki-opencode-ssh:
+    build:
+      context: .
+      dockerfile: Dockerfile.opencode
+      args:
+        HOST_UID: ${AWOKI_HOST_UID:-1000}
+        HOST_GID: ${AWOKI_HOST_GID:-1000}
+        OPENCODE_INSTALL_MODE: ${AWOKI_OPENCODE_INSTALL_MODE:-latest}
+        OPENCODE_SAFE_VERSION: ${AWOKI_OPENCODE_SAFE_VERSION:-}
+        OPENCODE_RESOLVE_TOKEN: ${AWOKI_OPENCODE_RESOLVE_TOKEN:-manual-build}
+    image: awoki-opencode-ssh:latest
+    restart: unless-stopped
+    working_dir: /awoki
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${AWOKI_OPENCODE_SSH_PORT:-2222}:22"
+      - "127.0.0.1:${AWOKI_LAVISH_PORT:-4387}:${AWOKI_LAVISH_PORT:-4387}"
+    environment:
+      NO_COLOR: "1"
+      TERM: xterm-256color
+      OPENCODE_CONFIG_DIR: /awoki/.opencode
+      OPENCODE_DISABLE_AUTOUPDATE: "1"
+      OPENCODE_DISABLE_MOUSE: "1"
+      OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT: "1"
+      OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX: "4096"
+      AWOKI_ROOT: /awoki
+      AWOKI_MODE: container-opencode
+      AWOKI_PROJECT_ID: ${AWOKI_PROJECT_ID:-__auto__}
+      AWOKI_GLOBAL_ROOT: /global
+      AWOKI_GLOBAL_SKILLS_DIR: /global/skills
+      AWOKI_QDRANT_URL: http://qdrant:6333
+      AWOKI_QDRANT_HOST_URL: http://qdrant:6333
+      AWOKI_QDRANT_CONTAINER_URL: http://qdrant:6333
+      QDRANT_URL: http://qdrant:6333
+      AWOKI_QDRANT_COLLECTION: ${AWOKI_QDRANT_COLLECTION:-awoki_jina_embeddings_v2_base_code_768}
+      AWOKI_CODE_QDRANT_COLLECTION: ${AWOKI_CODE_QDRANT_COLLECTION:-}
+      AWOKI_CODE_PEEK_MAX_CHARS: ${AWOKI_CODE_PEEK_MAX_CHARS:-3000}
+      AWOKI_CODE_CONTEXT_MAX_CHARS: ${AWOKI_CODE_CONTEXT_MAX_CHARS:-16000}
+      AWOKI_CODE_FULL_MAX_CHARS: ${AWOKI_CODE_FULL_MAX_CHARS:-50000}
+      AWOKI_CODE_RRF_K: ${AWOKI_CODE_RRF_K:-40}
+      AWOKI_CODE_QDRANT_TIMEOUT_SECONDS: ${AWOKI_CODE_QDRANT_TIMEOUT_SECONDS:-2}
+      AWOKI_CODE_RERANK_TIMEOUT_SECONDS: ${AWOKI_CODE_RERANK_TIMEOUT_SECONDS:-}
+      AWOKI_QDRANT_RECREATE_ON_DIM_MISMATCH: ${AWOKI_QDRANT_RECREATE_ON_DIM_MISMATCH:-0}
+      AWOKI_EMBEDDING_PROVIDER: ${AWOKI_EMBEDDING_PROVIDER:-openai}
+      AWOKI_EMBEDDING_MODEL: ${AWOKI_EMBEDDING_MODEL:-text-embeddings-inference}
+      AWOKI_EMBEDDING_DEPLOYMENT_ID: ${AWOKI_EMBEDDING_DEPLOYMENT_ID:-}
+      AWOKI_EMBEDDING_BASE_URL: ${AWOKI_EMBEDDING_BASE_URL:-}
+      AWOKI_EMBEDDING_API_KEY: ${AWOKI_EMBEDDING_API_KEY:-}
+      AWOKI_EMBEDDING_BATCH_SIZE: ${AWOKI_EMBEDDING_BATCH_SIZE:-32}
+      AWOKI_EMBEDDING_NORMALIZE: ${AWOKI_EMBEDDING_NORMALIZE:-1}
+      AWOKI_EMBEDDING_TIMEOUT_SECONDS: ${AWOKI_EMBEDDING_TIMEOUT_SECONDS:-30}
+      AWOKI_EMBEDDING_MAX_RETRIES: ${AWOKI_EMBEDDING_MAX_RETRIES:-1}
+      AWOKI_EMBEDDING_WORKER_MAX_RETRIES: ${AWOKI_EMBEDDING_WORKER_MAX_RETRIES:-2}
+      AWOKI_EMBEDDING_RETRY_BACKOFF_SECONDS: ${AWOKI_EMBEDDING_RETRY_BACKOFF_SECONDS:-1}
+      AWOKI_EMBEDDING_ADAPTIVE_MIN_BATCH_SIZE: ${AWOKI_EMBEDDING_ADAPTIVE_MIN_BATCH_SIZE:-4}
+      AWOKI_EMBEDDING_QUERY_TIMEOUT_SECONDS: ${AWOKI_EMBEDDING_QUERY_TIMEOUT_SECONDS:-5}
+      AWOKI_EMBEDDING_QUERY_MAX_RETRIES: ${AWOKI_EMBEDDING_QUERY_MAX_RETRIES:-0}
+      AWOKI_VECTOR_SIZE: ${AWOKI_VECTOR_SIZE:-768}
+      AWOKI_QUERY_PREFIX: ${AWOKI_QUERY_PREFIX:-}
+      AWOKI_DOCUMENT_PREFIX: ${AWOKI_DOCUMENT_PREFIX:-}
+      AWOKI_ALLOW_HASH_EMBEDDINGS: ${AWOKI_ALLOW_HASH_EMBEDDINGS:-0}
+      AWOKI_RERANK_ENABLED: ${AWOKI_RERANK_ENABLED:-0}
+      AWOKI_RERANK_PROVIDER: ${AWOKI_RERANK_PROVIDER:-tei}
+      AWOKI_RERANK_URL: ${AWOKI_RERANK_URL:-}
+      AWOKI_RERANK_MODEL: ${AWOKI_RERANK_MODEL:-}
+      AWOKI_RERANK_API_KEY: ${AWOKI_RERANK_API_KEY:-}
+      AWOKI_RERANK_API_KEY_ENV: ${AWOKI_RERANK_API_KEY_ENV:-}
+      AWOKI_RERANK_TIMEOUT_SECONDS: ${AWOKI_RERANK_TIMEOUT_SECONDS:-20}
+      AWOKI_RERANK_CANDIDATES: ${AWOKI_RERANK_CANDIDATES:-30}
+      AWOKI_RERANK_TOP_N: ${AWOKI_RERANK_TOP_N:-10}
+      AWOKI_RERANK_MAX_DOCUMENT_CHARS: ${AWOKI_RERANK_MAX_DOCUMENT_CHARS:-4000}
+      AWOKI_RERANK_FAIL_MODE: ${AWOKI_RERANK_FAIL_MODE:-fallback}
+      AWOKI_BURP_TARGET: ${AWOKI_BURP_TARGET:-local}
+      AWOKI_BURP_HOST_URL: ${AWOKI_BURP_HOST_URL:-http://127.0.0.1:9876}
+      AWOKI_BURP_CONTAINER_URL: ${AWOKI_BURP_CONTAINER_URL:-http://host.docker.internal:9876}
+      AWOKI_BURP_URL: ${AWOKI_BURP_CONTAINER_URL:-http://host.docker.internal:9876}
+      AWOKI_BURP_MCP_URL: ${AWOKI_BURP_CONTAINER_URL:-http://host.docker.internal:9876}
+      AWOKI_BURP_TIMEOUT: ${AWOKI_BURP_TIMEOUT:-60}
+      AWOKI_BURP_CALL_TIMEOUT: ${AWOKI_BURP_CALL_TIMEOUT:-180}
+      AWOKI_LAVISH_PORT: ${AWOKI_LAVISH_PORT:-4387}
+      AWOKI_LAVISH_VERSION: ${AWOKI_LAVISH_VERSION:-0.1.43}
+      # Public key only. The host private key is never mounted into the container.
+      AWOKI_SSH_AUTHORIZED_KEY: ${AWOKI_SSH_AUTHORIZED_KEY:-}
+      LAVISH_AXI_PORT: ${AWOKI_LAVISH_PORT:-4387}
+      LAVISH_AXI_HOST: 0.0.0.0
+      LAVISH_AXI_LINK_HOST: 127.0.0.1
+      LAVISH_AXI_ALLOWED_HOSTS: "127.0.0.1 localhost"
+      LAVISH_AXI_NO_OPEN: "1"
+      LAVISH_AXI_STATE_DIR: /awoki/workspace/.lavish/state
+      HARNESS_ROOT: /awoki
+      HARNESS_MODE: container-opencode
+      HARNESS_PROJECT_ID: ${HARNESS_PROJECT_ID:-__auto__}
+      HARNESS_GLOBAL_ROOT: /global
+      HARNESS_GLOBAL_SKILLS_DIR: /global/skills
+      QDRANT_COLLECTION_PROJECT: ${QDRANT_COLLECTION_PROJECT:-awoki_project}
+      QDRANT_COLLECTION_GLOBAL: ${QDRANT_COLLECTION_GLOBAL:-awoki_global}
+    volumes:
+      # Awoki source is baked into the image. Only runtime trust domains are writable.
+      - ./workspace:/awoki/workspace:rw
+      - ./.harness/state:/awoki/.harness/state:rw
+      - ./.harness/index:/awoki/.harness/index:rw
+      - ./.harness/artifacts:/awoki/.harness/artifacts:rw
+      - ./.harness/memory:/awoki/.harness/memory:rw
+      - ./.harness/notes.md:/awoki/.harness/notes.md:rw
+      - ./.opencode-state/share:/home/op/.local/share/opencode:rw
+      - ./.opencode-state/local-state:/home/op/.local/state/opencode:rw
+      - ./.opencode-state/config:/home/op/.config/opencode:rw
+      - ./.opencode-state/cache:/home/op/.cache:rw
+      - ./.opencode-state/npm:/home/op/.npm:rw
+      - awoki_nvim_share:/home/op/.local/share/nvim
+      - awoki_nvim_state:/home/op/.local/state/nvim
+      - awoki_ssh_host_keys:/etc/awoki-ssh-host-keys
+      - ./.awoki-global:/global:rw
+    # Keep /tmp on the image writable layer. Docker tmpfs mounts default to
+    # noexec, but OpenTUI extracts and maps a native shared library from /tmp.
+    tmpfs:
+      - /awoki/.harness/tmp
+      - /run
+    depends_on:
+      - qdrant
+    networks:
+      - awoki-data
+      - awoki-egress

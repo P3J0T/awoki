@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+COMPOSE_FILE="${1:-docker-compose.opencode.yml}"
+
+case "$COMPOSE_FILE" in
+  /*) ;;
+  *) COMPOSE_FILE="$ROOT/$COMPOSE_FILE" ;;
+esac
+
+STORAGE="$ROOT/data/qdrant"
+COLLECTIONS="$STORAGE/collections"
+HOST_ONLY="${AWOKI_QDRANT_STORAGE_HOST_ONLY:-0}"
+LIVE_ONLY="${AWOKI_QDRANT_STORAGE_LIVE_ONLY:-0}"
+
+fail() {
+  echo "[awoki] qdrant storage preflight failed: $*" >&2
+  exit 3
+}
+
+canonical_path() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+for path in "$STORAGE" "$COLLECTIONS"; do
+  if [[ -L "$path" ]]; then
+    fail "$path must be a real directory, not a symlink"
+  fi
+done
+
+mkdir -p "$COLLECTIONS"
+[[ -d "$STORAGE" ]] || fail "$STORAGE is not a directory"
+[[ -d "$COLLECTIONS" ]] || fail "$COLLECTIONS is not a directory"
+
+HOST_PROBE="$COLLECTIONS/.awoki-host-write-probe.$$"
+if ! (umask 077; mkdir "$HOST_PROBE" && rmdir "$HOST_PROBE"); then
+  fail "host cannot create directories under $COLLECTIONS"
+fi
+
+if [[ "$HOST_ONLY" == "1" ]]; then
+  exit 0
+fi
+
+command -v docker >/dev/null 2>&1 || fail "docker is unavailable"
+docker compose version >/dev/null 2>&1 || fail "docker compose is unavailable"
+[[ -f "$COMPOSE_FILE" ]] || fail "compose file does not exist: $COMPOSE_FILE"
+
+qdrant_container_id() {
+  docker compose -f "$COMPOSE_FILE" ps -a -q qdrant 2>/dev/null | head -n 1
+}
+
+container_running() {
+  local container="$1"
+  [[ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true)" == "true" ]]
+}
+
+verify_container_identity() {
+  local container="$1"
+  local expected_root actual_root mount_source
+
+  expected_root="$(canonical_path "$ROOT")"
+  actual_root="$(
+    docker inspect \
+      -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' \
+      "$container" 2>/dev/null || true
+  )"
+  mount_source="$(
+    docker inspect \
+      -f '{{ range .Mounts }}{{ if eq .Destination "/qdrant/storage" }}{{ .Source }}{{ end }}{{ end }}' \
+      "$container" 2>/dev/null || true
+  )"
+
+  [[ -n "$mount_source" ]] || fail \
+    "Qdrant container $container has no /qdrant/storage mount"
+
+  if [[ -n "$actual_root" ]]; then
+    actual_root="$(canonical_path "$actual_root")"
+    if [[ "$actual_root" != "$expected_root" ]]; then
+      echo "[awoki] running/stale Qdrant belongs to another Awoki checkout." >&2
+      echo "[awoki] current checkout: $expected_root" >&2
+      echo "[awoki] container checkout: $actual_root" >&2
+      echo "[awoki] container storage source: $mount_source" >&2
+      echo "[awoki] Remove only the stale Qdrant container, not its host data:" >&2
+      echo "  docker rm -f $container" >&2
+      echo "[awoki] Then rerun the Awoki launcher so Qdrant binds this checkout." >&2
+      fail "Qdrant storage identity mismatch"
+    fi
+  fi
+}
+
+live_probe() {
+  local container="$1"
+
+  if ! docker exec --user 0:0 "$container" /bin/sh -ceu '
+    storage=/qdrant/storage
+    collections="$storage/collections"
+    test -d "$storage"
+    mkdir -p "$collections"
+    test -d "$collections"
+    probe="$collections/.awoki-live-write-probe.$$"
+    mkdir "$probe"
+    rmdir "$probe"
+  '
+  then
+    echo "[awoki] The actual running Qdrant container cannot create collection directories." >&2
+    echo "[awoki] Host storage expected at: $STORAGE" >&2
+    echo "[awoki] Container: $container" >&2
+    echo "[awoki] Refusing semantic/vector work until the live bind is writable." >&2
+    fail "running Qdrant storage is not writable"
+  fi
+}
+
+existing="$(qdrant_container_id)"
+
+if [[ -n "$existing" ]]; then
+  verify_container_identity "$existing"
+fi
+
+if [[ "$LIVE_ONLY" == "1" ]]; then
+  [[ -n "$existing" ]] || fail "Qdrant service container does not exist"
+  container_running "$existing" || fail "Qdrant service container is not running"
+  live_probe "$existing"
+  exit 0
+fi
+
+if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+  --user 0:0 \
+  --entrypoint /bin/sh \
+  qdrant -ceu '
+    storage=/qdrant/storage
+    collections="$storage/collections"
+    test -d "$storage"
+    mkdir -p "$collections"
+    test -d "$collections"
+    probe="$collections/.awoki-docker-write-probe.$$"
+    mkdir "$probe"
+    rmdir "$probe"
+  '
+then
+  echo "[awoki] Docker cannot create a directory inside the Qdrant storage bind." >&2
+  echo "[awoki] Host storage: $STORAGE" >&2
+  echo "[awoki] Compose file: $COMPOSE_FILE" >&2
+  echo "[awoki] Refusing to start Qdrant because vector writes would fail later." >&2
+  exit 3
+fi
+
+if [[ -n "$existing" ]] && container_running "$existing"; then
+  live_probe "$existing"
+fi

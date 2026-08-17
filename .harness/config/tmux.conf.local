@@ -1,0 +1,28 @@
+# Awoki customizations for the vendored gpakosz/.tmux configuration.
+# The upstream main file is immutable under /opt/oh-my-tmux. Customize this
+# local layer only.
+
+# Keep navigation rooted in the current project directory.
+tmux_conf_new_session_retain_current_path=true
+tmux_conf_new_window_retain_current_path=true
+tmux_conf_new_pane_retain_current_path=true
+
+# Let the configuration detect true-colour support from the SSH client.
+tmux_conf_24b_colour=auto
+
+# Show the active project path in the status line without external network calls.
+tmux_conf_theme_status_left=" #S | #{pretty_pane_current_path} "
+tmux_conf_theme_status_right=" #{prefix}#{mouse}#{pairing}#{synchronized} , %R , %d %b | #{username}#{root} | #{hostname} "
+
+# Clipboard integration is deliberately disabled in the container. Copy-mode
+# still writes to tmux buffers; host clipboard forwarding can be added later as
+# an explicit trust decision.
+tmux_conf_copy_to_os_clipboard=false
+
+# Awoki operational defaults.
+set -g history-limit 100000
+set -g mouse on
+set -g renumber-windows on
+set -g set-clipboard off
+set -g status-interval 5
+setw -g mode-keys vi

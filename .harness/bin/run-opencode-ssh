@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+cd "$ROOT"
+
+"$ROOT/.harness/bin/awoki-backup" lock-check >/dev/null
+
+SSH_DIR="$ROOT/.ssh-container"
+STATE="$ROOT/.opencode-state"
+INIT_MARKER="$ROOT/.harness/state/layout_initialized.json"
+COMPOSE_FILE="$ROOT/docker-compose.opencode.yml"
+
+read_env_default() {
+  local key="$1"
+  local default_value="$2"
+  local value=""
+  if [[ -f "$ROOT/.env" ]]; then
+    value="$(awk -F= -v k="$key" '
+      $0 ~ /^[[:space:]]*#/ { next }
+      $0 !~ /=/ { next }
+      {
+        key=$1
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+        if (key == k) {
+          sub(/^[^=]*=/, "")
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+          gsub(/^"|"$/, "")
+          print
+        }
+      }
+    ' "$ROOT/.env" | tail -n 1)"
+  fi
+  printf '%s' "${value:-$default_value}"
+}
+
+SSH_PORT="${AWOKI_OPENCODE_SSH_PORT:-$(read_env_default AWOKI_OPENCODE_SSH_PORT 2222)}"
+COMPOSE_PROJECT_NAME="${AWOKI_COMPOSE_PROJECT_NAME:-$(read_env_default AWOKI_COMPOSE_PROJECT_NAME awoki)}"
+export AWOKI_OPENCODE_SSH_PORT="$SSH_PORT"
+export AWOKI_COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME"
+
+if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
+  echo "[awoki] invalid AWOKI_OPENCODE_SSH_PORT: $SSH_PORT" >&2
+  exit 2
+fi
+
+if [[ ! -f "$INIT_MARKER" ]]; then
+  echo "Awoki base layout is not initialized." >&2
+  echo "Run this once from the repo root first:" >&2
+  echo "  ./init-awoki.sh" >&2
+  exit 2
+fi
+
+for required in "$ROOT/workspace" "$ROOT/workspace/projects" "$ROOT/.harness/index" "$ROOT/.harness/artifacts" "$ROOT/.awoki-global" "$ROOT/data/qdrant" "$ROOT/data/qdrant/collections"; do
+  if [[ ! -d "$required" ]]; then
+    echo "Awoki layout is incomplete: missing $required" >&2
+    echo "Repair it with:" >&2
+    echo "  ./init-awoki.sh" >&2
+    exit 2
+  fi
+done
+
+mkdir -p "$STATE/share" "$STATE/local-state" "$STATE/config" "$STATE/cache" "$STATE/npm" "$ROOT/.harness/memory" "$ROOT/.harness/tmp"
+
+# Prepare and validate the host key pair, then pass only the public key through
+# Compose environment. Docker Desktop can fail individual host-file binds even
+# when the containing directory is shared correctly; no SSH key file is mounted.
+AWOKI_SSH_AUTHORIZED_KEY="$("$ROOT/.harness/bin/opencode-ssh-public-key")"
+export AWOKI_SSH_AUTHORIZED_KEY
+
+# Qdrant uses a host bind for durable storage. Materialize and write-probe the
+# collections parent from Docker's own mount view before starting the service so
+# filesystem/share problems fail here instead of after a long vector build.
+"$ROOT/.harness/bin/prepare-qdrant-storage" "$COMPOSE_FILE"
+
+port_is_bindable() {
+  python3 - "$SSH_PORT" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(("127.0.0.1", port))
+finally:
+    s.close()
+PY
+}
+
+port_owners() {
+  docker ps --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' \
+    | grep -E "(127\\.0\\.0\\.1|0\\.0\\.0\\.0|::|\\[::\\]):${SSH_PORT}->|:${SSH_PORT}->" || true
+}
+
+current_container_id="$(docker compose -f "$COMPOSE_FILE" ps -q awoki-opencode-ssh 2>/dev/null || true)"
+owners="$(port_owners)"
+
+if ! port_is_bindable; then
+  if [[ -n "$current_container_id" ]] && printf '%s\n' "$owners" | grep -q "^${current_container_id:0:12}"; then
+    : # This project's already-running container owns the port; compose up is safe.
+  else
+    echo "[awoki] SSH port 127.0.0.1:$SSH_PORT is already in use." >&2
+    echo >&2
+    if [[ -n "$owners" ]]; then
+      echo "Docker containers publishing this port:" >&2
+      printf '%s\n' "$owners" >&2
+      echo >&2
+    fi
+    echo "Choose a different host port, for example:" >&2
+    echo "  AWOKI_OPENCODE_SSH_PORT=2224 ./run-opencode.sh" >&2
+    echo >&2
+    echo "Or edit .env:" >&2
+    echo "  AWOKI_OPENCODE_SSH_PORT=2224" >&2
+    echo >&2
+    echo "Then SSH with:" >&2
+    echo "  ssh -i $SSH_DIR/id_ed25519 -p 2224 op@127.0.0.1" >&2
+    exit 3
+  fi
+fi
+
+# Start Qdrant alone first. The actual long-lived service container, not merely
+# a disposable Compose probe, owns the storage contract.
+docker compose -f "$COMPOSE_FILE" up -d qdrant
+AWOKI_QDRANT_WAIT_COMPOSE_FILE="$COMPOSE_FILE" \
+AWOKI_QDRANT_WAIT_SERVICE=awoki-opencode-ssh \
+  "$ROOT/.harness/bin/wait-qdrant"
+
+# Verify the exact running Qdrant container after Compose has reconciled it.
+AWOKI_QDRANT_STORAGE_LIVE_ONLY=1 \
+  "$ROOT/.harness/bin/prepare-qdrant-storage" "$COMPOSE_FILE"
+
+opencode_up=(docker compose -f "$COMPOSE_FILE" up -d)
+case "${AWOKI_OPENCODE_FORCE_RECREATE:-0}" in
+  1|true|yes|on) opencode_up+=(--force-recreate) ;;
+esac
+opencode_up+=(awoki-opencode-ssh)
+"${opencode_up[@]}"
+
+CONTAINER_NAME="$(docker compose -f "$COMPOSE_FILE" ps -q awoki-opencode-ssh)"
+
+wait_for_ssh() {
+  local deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    if [[ -n "$CONTAINER_NAME" ]]; then
+      local state
+      state="$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+      if [[ "$state" == "exited" || "$state" == "dead" || "$state" == "restarting" ]]; then
+        echo "[awoki] OpenCode SSH container is $state; recent logs:" >&2
+        docker logs "$CONTAINER_NAME" --tail=80 >&2 || true
+        return 1
+      fi
+    fi
+
+    if command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$SSH_PORT" >/dev/null 2>&1; then
+      return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+      if python3 - "$SSH_PORT" >/dev/null 2>&1 <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+s = socket.socket()
+s.settimeout(0.5)
+s.connect(("127.0.0.1", port))
+s.close()
+PY
+      then
+        return 0
+      fi
+    fi
+
+    sleep 1
+  done
+
+  echo "[awoki] SSH did not become ready on 127.0.0.1:$SSH_PORT within 30s." >&2
+  if [[ -n "$CONTAINER_NAME" ]]; then
+    docker logs "$CONTAINER_NAME" --tail=80 >&2 || true
+  fi
+  return 1
+}
+
+wait_for_ssh
+
+verify_ssh_auth() {
+  if ! command -v ssh >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local known_hosts="$SSH_DIR/known_hosts"
+  touch "$known_hosts"
+  chmod 600 "$known_hosts" 2>/dev/null || true
+
+  if ssh \
+    -i "$SSH_DIR/id_ed25519" \
+    -o IdentitiesOnly=yes \
+    -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$known_hosts" \
+    -p "$SSH_PORT" \
+    op@127.0.0.1 true >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "[awoki] SSH port is open, but public-key authentication failed." >&2
+  echo >&2
+  echo "Expected local public key fingerprint:" >&2
+  ssh-keygen -lf "$SSH_DIR/id_ed25519.pub" >&2 || true
+  echo >&2
+  echo "Container SSH diagnostics:" >&2
+  docker exec "$CONTAINER_NAME" sh -lc '
+    set +e
+    echo "--- installed authorized_keys ---"
+    ls -ld /home/op /home/op/.ssh 2>/dev/null || true
+    ls -l /home/op/.ssh/authorized_keys 2>/dev/null || true
+    ssh-keygen -lf /home/op/.ssh/authorized_keys 2>/dev/null || cat /home/op/.ssh/authorized_keys 2>/dev/null || true
+    echo "--- sshd effective config ---"
+    sshd -T 2>/dev/null | grep -E "^(authorizedkeysfile|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|strictmodes|permitrootlogin)" || true
+    echo "--- op account ---"
+    passwd -S op 2>/dev/null || true
+  ' >&2 || true
+  echo >&2
+  echo "Recent SSH container logs:" >&2
+  docker logs "$CONTAINER_NAME" --tail=80 >&2 || true
+  echo >&2
+  echo "Manual SSH may still work. Try:" >&2
+  echo "  ssh -i $SSH_DIR/id_ed25519 -o IdentitiesOnly=yes -p $SSH_PORT op@127.0.0.1" >&2
+  echo >&2
+  echo "If manual SSH fails too, rebuild the image, then rerun:" >&2
+  echo "  docker compose -f docker-compose.opencode.yml build --no-cache awoki-opencode-ssh" >&2
+  echo "  ./run-opencode.sh" >&2
+  return 1
+}
+
+if ! verify_ssh_auth; then
+  echo >&2
+  echo "[awoki] WARNING: automatic SSH auth probe failed, but SSH port is open." >&2
+  echo "[awoki] This can be a false negative on some macOS/OpenSSH setups." >&2
+  echo "[awoki] Printing the manual SSH command anyway." >&2
+fi
+
+echo "SSH into OpenCode container with:"
+echo "ssh -i $SSH_DIR/id_ed25519 -o IdentitiesOnly=yes -p $SSH_PORT op@127.0.0.1"
+echo
+echo "Then run:"
+echo "cd /awoki && opencode"

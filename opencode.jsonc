@@ -1,0 +1,76 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // OpenCode loads MCP servers from the `mcp` key. Awoki uses mcp-auto so the same config works on host and inside the SSH container.
+  "mcp": {
+    "burp": {
+      "type": "remote",
+      "url": "http://host.docker.internal:9876",
+      "enabled": true,
+      "oauth": false,
+      "timeout": 30000,
+      "headers": {
+        "Host": "127.0.0.1:9876",
+        "Origin": "http://127.0.0.1:9876"
+      }
+    },
+
+    "awoki": {
+      "type": "local",
+      "command": [".harness/bin/mcp-auto"],
+      "cwd": ".",
+      "enabled": true,
+      "timeout": 120000,
+      "environment": {
+        "AWOKI_ROOT": ".",
+        "AWOKI_MODE": "auto",
+        "AWOKI_QDRANT_CONTAINER_URL": "http://qdrant:6333",
+        "AWOKI_QDRANT_URL": "http://qdrant:6333",
+        "QDRANT_URL": "http://qdrant:6333",
+        "AWOKI_QDRANT_HOST_URL": "http://qdrant:6333",
+        "AWOKI_GLOBAL_SKILLS_DIR": "~/.config/opencode/skills",
+        "HARNESS_ROOT": ".",
+        "HARNESS_MODE": "auto",
+        "HARNESS_GLOBAL_SKILLS_DIR": "~/.config/opencode/skills"
+      }
+    }
+  },
+
+  // Keep the model aware of the harness map without dumping all skill contents.
+  "instructions": [
+    "HARNESS.md",
+    ".harness/HARNESS.md",
+    "docs/COMMANDS.md",
+    "docs/RELIABILITY.md"
+  ],
+
+  // Conservative defaults: ask before edits/bash. Adjust per trust level.
+  "permission": {
+    "edit": "ask",
+    "bash": "ask",
+    "todowrite": "allow",
+    "skill": {
+      "*": "allow"
+    }
+  },
+
+  "compaction": {
+    "auto": true,
+    "prune": false,
+    "reserved": 10000
+  },
+
+  "watcher": {
+    "ignore": [
+      ".git/**",
+      ".venv/**",
+      "data/**",
+      "__pycache__/**",
+      ".pytest_cache/**",
+      ".harness/state/**",
+      "workspace/projects/*/index/**",
+      "workspace/projects/*/SITUATION.md",
+      "workspace/projects/*/HANDOFF.md"
+    ]
+  }
+}

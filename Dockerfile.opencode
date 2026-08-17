@@ -1,0 +1,195 @@
+# OpenCode-over-SSH image for Awoki.
+#
+# This image is self-contained for clean installs. OpenCode runs in this
+# container and Awoki MCP is selected by .harness/bin/mcp-auto. Inside this
+# SSH container, mcp-auto runs .harness/bin/mcp-local over stdio.
+FROM node:22-bookworm-slim AS node_runtime
+FROM golang:1.26.5-bookworm AS go_semantics_builder
+WORKDIR /src
+COPY .harness/code_search/go_semantics_probe.go /src/main.go
+RUN CGO_ENABLED=0 GO111MODULE=off GOTOOLCHAIN=local go build -trimpath -ldflags="-s -w" -o /out/awoki-go-semantics /src/main.go \
+    && /out/awoki-go-semantics --version | grep -E '^awoki-go-semantics go1\.26\.5$'
+
+FROM python:3.12-slim-bookworm
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+ARG OPENCODE_INSTALL_MODE=latest
+ARG OPENCODE_SAFE_VERSION=
+ARG OPENCODE_RESOLVE_TOKEN=manual-build
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    AWOKI_EMBEDDING_PROVIDER=openai \
+    AWOKI_RERANK_ENABLED=0 \
+    NO_COLOR=1 \
+    TERM=xterm-256color \
+    OPENCODE_DISABLE_AUTOUPDATE=1 \
+    OPENCODE_DISABLE_MOUSE=1 \
+    OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT=1 \
+    OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=4096 \
+    OPENCODE_CONFIG_DIR=/awoki/.opencode
+
+USER root
+WORKDIR /awoki
+
+# Awoki SSH Dockerfile block: sshd directives are written with echo, not raw Dockerfile instructions.
+# ltrace is optional because it is not available on every Debian/architecture combination.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      bash \
+      ca-certificates \
+      curl \
+      wget \
+      git \
+      openssh-client \
+      openssh-server \
+      gnupg \
+      make \
+      cmake \
+      ninja-build \
+      build-essential \
+      pkg-config \
+      python3-venv \
+      file \
+      binutils \
+      elfutils \
+      bsdextrautils \
+      xxd \
+      coreutils \
+      findutils \
+      grep \
+      sed \
+      gawk \
+      ripgrep \
+      fd-find \
+      jq \
+      yq \
+      sqlite3 \
+      tree \
+      less \
+      neovim \
+      tmux \
+      vim-tiny \
+      nano \
+      unzip \
+      zip \
+      p7zip-full \
+      tar \
+      gzip \
+      bzip2 \
+      xz-utils \
+      zstd \
+      strace \
+      gdb \
+      gdbserver \
+      lsof \
+      procps \
+      psmisc \
+      perl \
+      util-linux \
+      iproute2 \
+      iputils-ping \
+      dnsutils \
+      netcat-openbsd \
+      nmap \
+      tcpdump \
+      yara \
+      libimage-exiftool-perl \
+      python3-magic \
+    && for pkg in ltrace; do \
+         if apt-cache show "$pkg" >/dev/null 2>&1; then \
+           apt-get install -y --no-install-recommends "$pkg"; \
+         else \
+           echo "[awoki] optional apt package not available on this architecture: $pkg"; \
+         fi; \
+       done \
+    && if command -v fdfind >/dev/null 2>&1; then ln -sf "$(command -v fdfind)" /usr/local/bin/fd; fi \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=go_semantics_builder /out/awoki-go-semantics /usr/local/bin/awoki-go-semantics
+COPY --from=node_runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node_runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+# npm and npx are symlinks in the official Node image. Copying each path to an
+# explicit file destination dereferences/flattens the symlink, which makes the
+# launcher resolve ../lib/cli.js relative to /usr/local/bin and fail. Recreate
+# the canonical links against the copied npm installation instead.
+RUN install -d -m 1777 /tmp \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && test -f /usr/local/lib/node_modules/npm/lib/cli.js \
+    && node --version | grep -E '^v22\.' \
+    && npm --version \
+    && npx --version \
+    && case "$OPENCODE_INSTALL_MODE" in \
+         latest) opencode_spec="opencode-ai@latest" ;; \
+         safe) \
+           test -n "$OPENCODE_SAFE_VERSION" || { echo "safe OpenCode mode requires OPENCODE_SAFE_VERSION" >&2; exit 2; }; \
+           printf '%s' "$OPENCODE_SAFE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.+][A-Za-z0-9.-]+)?$' || { echo "invalid exact OpenCode safe version: $OPENCODE_SAFE_VERSION" >&2; exit 2; }; \
+           opencode_spec="opencode-ai@${OPENCODE_SAFE_VERSION}" ;; \
+         *) echo "invalid OPENCODE_INSTALL_MODE: $OPENCODE_INSTALL_MODE (expected latest|safe)" >&2; exit 2 ;; \
+       esac \
+    && echo "[awoki] OpenCode resolve token: ${OPENCODE_RESOLVE_TOKEN}" \
+    && npm install -g "$opencode_spec" \
+    && resolved_opencode="$(opencode --version)" \
+    && if [ "$OPENCODE_INSTALL_MODE" = safe ]; then test "$resolved_opencode" = "$OPENCODE_SAFE_VERSION"; channel_state="operator_selected_safe"; else channel_state="latest_untested"; fi \
+    && install -d -m 755 /usr/local/share/awoki \
+    && printf '{"schema":1,"install_mode":"%s","channel_state":"%s","requested_safe_version":"%s","resolved_cli":"%s"}\n' "$OPENCODE_INSTALL_MODE" "$channel_state" "$OPENCODE_SAFE_VERSION" "$resolved_opencode" > /usr/local/share/awoki/opencode-runtime.json \
+    && mkdir -p /var/run/sshd /home/op/.ssh /home/op/.local/share/opencode /home/op/.local/share/nvim /home/op/.local/state/opencode /home/op/.local/state/nvim /home/op/.config/opencode /home/op/.config/nvim /home/op/.cache /home/op/.npm /global /etc/awoki-ssh-host-keys \
+    && if ! getent group "${HOST_GID}" >/dev/null 2>&1; then groupadd -g "${HOST_GID}" op; fi \
+    && if ! id -u op >/dev/null 2>&1; then useradd -m -u "${HOST_UID}" -g "${HOST_GID}" -s /bin/bash op; fi \
+    && chown -R op:"${HOST_GID}" /home/op /global \
+    && chmod 700 /home/op/.ssh \
+    && passwd -d op \
+    && (usermod -U op 2>/dev/null || true) \
+    && sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config \
+    && sed -i 's/^#\?KbdInteractiveAuthentication .*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config \
+    && sed -i 's/^#\?ChallengeResponseAuthentication .*/ChallengeResponseAuthentication no/' /etc/ssh/sshd_config \
+    && sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
+    && sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config \
+    && { \
+         echo ''; \
+         echo '# Awoki OpenCode SSH mode'; \
+         echo 'PubkeyAuthentication yes'; \
+         echo 'PasswordAuthentication no'; \
+         echo 'KbdInteractiveAuthentication no'; \
+         echo 'ChallengeResponseAuthentication no'; \
+         echo 'PermitRootLogin no'; \
+         echo 'StrictModes yes'; \
+         echo 'AuthorizedKeysFile /home/op/.ssh/authorized_keys'; \
+       } >>/etc/ssh/sshd_config
+
+COPY requirements.txt /tmp/requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install -r /tmp/requirements.txt
+
+COPY . /awoki
+COPY .harness/bin/opencode-ssh-entrypoint /usr/local/bin/opencode-ssh-entrypoint
+RUN set -eux; \
+    resolved_opencode="$(opencode --version)"; \
+    npm install --prefix /awoki/.opencode --package-lock=false --save-exact "@opencode-ai/plugin@${resolved_opencode}" "@opencode-ai/sdk@${resolved_opencode}"; \
+    chmod +x /awoki/.harness/bin/opencode-runtime-compat-check; \
+    /awoki/.harness/bin/opencode-runtime-compat-check --materialize; \
+    chmod +x /usr/local/bin/opencode-ssh-entrypoint /awoki/.harness/bin/awoki-runtime-snapshot /awoki/.harness/bin/code-parser-check /awoki/.harness/bin/code-search-eval-check \
+    && AWOKI_ROOT=/awoki HARNESS_ROOT=/awoki /awoki/.harness/bin/code-parser-check \
+    && AWOKI_ROOT=/awoki HARNESS_ROOT=/awoki /awoki/.harness/bin/code-search-eval-check \
+    && /usr/local/bin/awoki-go-semantics --version | grep -E '^awoki-go-semantics go1\.26\.5$' \
+    && install -d -m 755 /opt/oh-my-tmux \
+    && install -m 644 /awoki/.harness/vendor/oh-my-tmux/.tmux.conf /opt/oh-my-tmux/.tmux.conf \
+    && install -m 644 /awoki/.harness/vendor/oh-my-tmux/.tmux.conf.local /opt/oh-my-tmux/.tmux.conf.local.sample \
+    && install -m 644 /awoki/.harness/vendor/oh-my-tmux/LICENSE.MIT /opt/oh-my-tmux/LICENSE.MIT \
+    && install -m 644 /awoki/.harness/vendor/oh-my-tmux/LICENSE.WTFPLv2 /opt/oh-my-tmux/LICENSE.WTFPLv2 \
+    && ln -s /opt/oh-my-tmux/.tmux.conf /home/op/.tmux.conf \
+    && install -o op -g op -m 644 /awoki/.harness/config/tmux.conf.local /home/op/.tmux.conf.local \
+    && cp /awoki/.harness/config/nvim/init.lua /home/op/.config/nvim/init.lua \
+    && chown -R root:root /awoki /opt/oh-my-tmux \
+    && chown -R op:op /home/op \
+    && chmod -R a+rX /awoki \
+    && AWOKI_ROOT=/awoki HARNESS_ROOT=/awoki /awoki/.harness/bin/mcp-preflight --quiet \
+    && runuser -u op -- env HOME=/home/op TERM=xterm-256color /awoki/.harness/bin/tmux-check
+
+EXPOSE 22
+CMD ["/usr/local/bin/opencode-ssh-entrypoint"]

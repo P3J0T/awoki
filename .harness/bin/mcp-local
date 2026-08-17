@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-${HARNESS_ROOT:-/awoki}}"
+if [[ ! -d "$ROOT/.harness" ]]; then
+  ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+fi
+
+cd "$ROOT"
+"$ROOT/.harness/bin/awoki-backup" lock-check >/dev/null
+mkdir -p "$ROOT/.harness/state"
+LOG="$ROOT/.harness/state/mcp-local.stderr.log"
+
+export AWOKI_ROOT="$ROOT"
+export AWOKI_MODE="${AWOKI_MODE:-local}"
+export HARNESS_ROOT="$ROOT"
+export HARNESS_MODE="${HARNESS_MODE:-$AWOKI_MODE}"
+export PYTHONPATH="$ROOT/.harness:$ROOT:${PYTHONPATH:-}"
+
+printf '[awoki-mcp] startup %s root=%s mode=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ROOT" "$AWOKI_MODE" >>"$LOG"
+if ! "$ROOT/.harness/bin/mcp-preflight" --quiet >>"$LOG" 2>&1; then
+  echo "[awoki-mcp] preflight failed; recent diagnostics from $LOG:" >&2
+  tail -n 80 "$LOG" >&2 || true
+  exit 1
+fi
+
+# stdout is reserved for MCP JSON-RPC. Mirror stderr to OpenCode and the durable
+# runtime log so a local MCP crash is actionable instead of appearing only as
+# an unexplained process exit code.
+exec "${PYTHON:-python3}" -u "$ROOT/.harness/server.py" \
+  2> >(tee -a "$LOG" >&2)
