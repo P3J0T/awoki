@@ -35,12 +35,38 @@ read_env_default() {
 }
 
 SSH_PORT="${AWOKI_OPENCODE_SSH_PORT:-$(read_env_default AWOKI_OPENCODE_SSH_PORT 2222)}"
+WEB_ENABLED_RAW="${AWOKI_OPENCODE_WEB_ENABLED:-$(read_env_default AWOKI_OPENCODE_WEB_ENABLED 1)}"
+WEB_PORT="${AWOKI_OPENCODE_WEB_PORT:-$(read_env_default AWOKI_OPENCODE_WEB_PORT 4096)}"
+WEB_USERNAME="${AWOKI_OPENCODE_WEB_USERNAME:-$(read_env_default AWOKI_OPENCODE_WEB_USERNAME opencode)}"
+WEB_PASSWORD_OVERRIDE="${AWOKI_OPENCODE_WEB_PASSWORD:-$(read_env_default AWOKI_OPENCODE_WEB_PASSWORD '')}"
 COMPOSE_PROJECT_NAME="${AWOKI_COMPOSE_PROJECT_NAME:-$(read_env_default AWOKI_COMPOSE_PROJECT_NAME awoki)}"
+
+case "$WEB_ENABLED_RAW" in
+  1|true|TRUE|yes|YES|on|ON) WEB_ENABLED=1 ;;
+  0|false|FALSE|no|NO|off|OFF) WEB_ENABLED=0 ;;
+  *) echo "[awoki] invalid AWOKI_OPENCODE_WEB_ENABLED: $WEB_ENABLED_RAW" >&2; exit 2 ;;
+esac
+
 export AWOKI_OPENCODE_SSH_PORT="$SSH_PORT"
+export AWOKI_OPENCODE_WEB_ENABLED="$WEB_ENABLED"
+export AWOKI_OPENCODE_WEB_PORT="$WEB_PORT"
+export AWOKI_OPENCODE_WEB_USERNAME="$WEB_USERNAME"
 export AWOKI_COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME"
 
 if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
   echo "[awoki] invalid AWOKI_OPENCODE_SSH_PORT: $SSH_PORT" >&2
+  exit 2
+fi
+if [[ ! "$WEB_PORT" =~ ^[0-9]+$ ]] || (( WEB_PORT < 1 || WEB_PORT > 65535 )); then
+  echo "[awoki] invalid AWOKI_OPENCODE_WEB_PORT: $WEB_PORT" >&2
+  exit 2
+fi
+if [[ "$WEB_PORT" == "$SSH_PORT" ]]; then
+  echo "[awoki] AWOKI_OPENCODE_WEB_PORT must differ from AWOKI_OPENCODE_SSH_PORT" >&2
+  exit 2
+fi
+if [[ ! "$WEB_USERNAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "[awoki] invalid AWOKI_OPENCODE_WEB_USERNAME: use letters, digits, dot, underscore, or dash" >&2
   exit 2
 fi
 
@@ -62,6 +88,12 @@ done
 
 mkdir -p "$STATE/share" "$STATE/local-state" "$STATE/config" "$STATE/cache" "$STATE/npm" "$ROOT/.harness/memory" "$ROOT/.harness/tmp"
 
+if (( WEB_ENABLED )); then
+  AWOKI_OPENCODE_WEB_PASSWORD="$WEB_PASSWORD_OVERRIDE" \
+    "$ROOT/.harness/bin/prepare-opencode-web-auth" >/dev/null
+fi
+unset AWOKI_OPENCODE_WEB_PASSWORD WEB_PASSWORD_OVERRIDE
+
 # Prepare and validate the host key pair, then pass only the public key through
 # Compose environment. Docker Desktop can fail individual host-file binds even
 # when the containing directory is shared correctly; no SSH key file is mounted.
@@ -74,7 +106,8 @@ export AWOKI_SSH_AUTHORIZED_KEY
 "$ROOT/.harness/bin/prepare-qdrant-storage" "$COMPOSE_FILE"
 
 port_is_bindable() {
-  python3 - "$SSH_PORT" <<'PY' >/dev/null 2>&1
+  local port="$1"
+  python3 - "$port" <<'PY' >/dev/null 2>&1
 import socket
 import sys
 
@@ -89,35 +122,32 @@ PY
 }
 
 port_owners() {
+  local port="$1"
   docker ps --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' \
-    | grep -E "(127\\.0\\.0\\.1|0\\.0\\.0\\.0|::|\\[::\\]):${SSH_PORT}->|:${SSH_PORT}->" || true
+    | grep -E "(127\\.0\\.0\\.1|0\\.0\\.0\\.0|::|\\[::\\]):${port}->|:${port}->" || true
+}
+
+check_published_port() {
+  local label="$1" port="$2"
+  local owners
+  owners="$(port_owners "$port")"
+  if port_is_bindable "$port"; then
+    return 0
+  fi
+  if [[ -n "$current_container_id" ]] && printf '%s\n' "$owners" | grep -q "^${current_container_id:0:12}"; then
+    return 0
+  fi
+  echo "[awoki] ${label} port 127.0.0.1:${port} is already in use." >&2
+  if [[ -n "$owners" ]]; then
+    echo "Docker containers publishing this port:" >&2
+    printf '%s\n' "$owners" >&2
+  fi
+  exit 3
 }
 
 current_container_id="$(docker compose -f "$COMPOSE_FILE" ps -q awoki-opencode-ssh 2>/dev/null || true)"
-owners="$(port_owners)"
-
-if ! port_is_bindable; then
-  if [[ -n "$current_container_id" ]] && printf '%s\n' "$owners" | grep -q "^${current_container_id:0:12}"; then
-    : # This project's already-running container owns the port; compose up is safe.
-  else
-    echo "[awoki] SSH port 127.0.0.1:$SSH_PORT is already in use." >&2
-    echo >&2
-    if [[ -n "$owners" ]]; then
-      echo "Docker containers publishing this port:" >&2
-      printf '%s\n' "$owners" >&2
-      echo >&2
-    fi
-    echo "Choose a different host port, for example:" >&2
-    echo "  AWOKI_OPENCODE_SSH_PORT=2224 ./run-opencode.sh" >&2
-    echo >&2
-    echo "Or edit .env:" >&2
-    echo "  AWOKI_OPENCODE_SSH_PORT=2224" >&2
-    echo >&2
-    echo "Then SSH with:" >&2
-    echo "  ssh -i $SSH_DIR/id_ed25519 -p 2224 op@127.0.0.1" >&2
-    exit 3
-  fi
-fi
+check_published_port "SSH" "$SSH_PORT"
+check_published_port "OpenCode Web" "$WEB_PORT"
 
 # Start Qdrant alone first. The actual long-lived service container, not merely
 # a disposable Compose probe, owns the storage contract.
@@ -184,6 +214,27 @@ PY
 
 wait_for_ssh
 
+wait_for_web() {
+  (( WEB_ENABLED )) || return 0
+  local deadline=$((SECONDS + 30))
+  local password_file="$STATE/web-auth/password"
+  while (( SECONDS < deadline )); do
+    if "$ROOT/.harness/bin/opencode-web-health" \
+      --url "http://127.0.0.1:${WEB_PORT}" \
+      --username "$WEB_USERNAME" \
+      --password-file "$password_file" \
+      --timeout 1 >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "[awoki] OpenCode Web did not become healthy on http://127.0.0.1:${WEB_PORT}" >&2
+  [[ -n "$CONTAINER_NAME" ]] && docker logs "$CONTAINER_NAME" --tail=100 >&2 || true
+  return 1
+}
+
+wait_for_web
+
 verify_ssh_auth() {
   if ! command -v ssh >/dev/null 2>&1; then
     return 0
@@ -241,8 +292,15 @@ if ! verify_ssh_auth; then
   echo "[awoki] Printing the manual SSH command anyway." >&2
 fi
 
+if (( WEB_ENABLED )); then
+  echo "OpenCode Web: http://127.0.0.1:${WEB_PORT}"
+  echo "OpenCode Web username: ${WEB_USERNAME}"
+  echo "Show the generated password explicitly with:"
+  echo "  make opencode-web-password"
+  echo
+fi
 echo "SSH into OpenCode container with:"
 echo "ssh -i $SSH_DIR/id_ed25519 -o IdentitiesOnly=yes -p $SSH_PORT op@127.0.0.1"
 echo
-echo "Then run:"
-echo "cd /awoki && opencode"
+echo "Then run the Awoki client wrapper (attaches to the shared Web backend when enabled):"
+echo "cd /awoki && awoki-opencode"

@@ -158,7 +158,7 @@ Local structural/FTS repository work can be used without authorizing remote embe
 
 ## Install
 
-The recommended operator path is **Docker + SSH + tmux + OpenCode**. tmux is not an Awoki correctness requirement, but it is the recommended wrapper for long reviews because the OpenCode process and its terminal survive an SSH disconnect.
+The recommended operator path is **Docker + OpenCode Web + SSH/tmux attach**. The container starts one authenticated OpenCode Web backend by default on host loopback, while the SSH TUI attaches to that same backend through `awoki-opencode`. tmux is optional process/UI convenience, not an Awoki correctness requirement.
 
 ### First install on the host
 
@@ -193,6 +193,8 @@ make opencode-runtime-check
 
 If `make install-opencode-ssh` or `make opencode-ssh-up` fails, stop at that failure and fix the startup problem first. Do not run `make opencode-runtime-check` against an old or partially started container; its secondary errors can obscure the original startup failure.
 
+OpenCode Web is enabled by default at `http://127.0.0.1:4096`. Awoki secures `.opencode-state/` and `web-auth/` as `0700` and generates a strong random Basic-Auth password in the ignored `.opencode-state/web-auth/password` single-link file with mode `0600`; retrieve it explicitly with `make opencode-web-password`. The password is not placed in Compose service environment/configuration or command-line arguments. Set `AWOKI_OPENCODE_WEB_ENABLED=0` to retain standalone SSH-only OpenCode behavior.
+
 Connect with the command printed by the installer, normally:
 
 ```bash
@@ -206,14 +208,14 @@ Inside the SSH container:
 ```bash
 cd /awoki
 tmux new -A -s awoki
-opencode
+awoki-opencode
 ```
 
-`tmux new -A -s awoki` creates the `awoki` session the first time and reattaches to it later. If SSH drops while OpenCode is running, reconnect with SSH and run the same tmux command; the existing OpenCode terminal should still be there.
+`awoki-opencode` attaches the TUI to the already-running Web backend, so browser and SSH use the same OpenCode sessions/state. `tmux new -A -s awoki` creates the `awoki` terminal session the first time and reattaches to it later. If SSH drops, the Web backend remains alive independently; reconnect and run the same tmux/client commands.
 
 To detach deliberately without stopping OpenCode, press `Ctrl-b d` (or `Ctrl-a d`; Awoki's tmux accepts either prefix). Then leave SSH normally.
 
-A useful tmux layout is one window for OpenCode and additional windows for shell/tests/logs. tmux survives **SSH disconnects**, but not **container recreation**. After `make opencode-recreate`, start a new tmux session and a new OpenCode process. Awoki/OpenCode persistent state is kept on the configured host mounts; the old in-container processes are not.
+A useful tmux layout is one window for the attached OpenCode TUI and additional windows for shell/tests/logs. tmux survives **SSH disconnects**, but not **container recreation**. The OpenCode Web backend is supervised by the container entrypoint and is not owned by tmux. After `make opencode-recreate`, the backend and attached TUI processes restart, while mounted Awoki/OpenCode state remains durable.
 
 ### Daily start / reconnect
 
@@ -232,10 +234,10 @@ cd /awoki
 tmux new -A -s awoki
 ```
 
-If OpenCode is not already running in that tmux session:
+If the attached TUI is not already running in that tmux session:
 
 ```bash
-opencode
+awoki-opencode
 ```
 
 Stop the SSH/Qdrant deployment deliberately with:

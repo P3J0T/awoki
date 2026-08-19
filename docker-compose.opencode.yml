@@ -43,6 +43,7 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:${AWOKI_OPENCODE_SSH_PORT:-2222}:22"
+      - "127.0.0.1:${AWOKI_OPENCODE_WEB_PORT:-4096}:${AWOKI_OPENCODE_WEB_PORT:-4096}"
       - "127.0.0.1:${AWOKI_LAVISH_PORT:-4387}:${AWOKI_LAVISH_PORT:-4387}"
     environment:
       NO_COLOR: "1"
@@ -110,6 +111,9 @@ services:
       AWOKI_LAVISH_VERSION: ${AWOKI_LAVISH_VERSION:-0.1.43}
       # Public key only. The host private key is never mounted into the container.
       AWOKI_SSH_AUTHORIZED_KEY: ${AWOKI_SSH_AUTHORIZED_KEY:-}
+      AWOKI_OPENCODE_WEB_ENABLED: ${AWOKI_OPENCODE_WEB_ENABLED:-1}
+      AWOKI_OPENCODE_WEB_PORT: ${AWOKI_OPENCODE_WEB_PORT:-4096}
+      AWOKI_OPENCODE_WEB_USERNAME: ${AWOKI_OPENCODE_WEB_USERNAME:-opencode}
       LAVISH_AXI_PORT: ${AWOKI_LAVISH_PORT:-4387}
       LAVISH_AXI_HOST: 0.0.0.0
       LAVISH_AXI_LINK_HOST: 127.0.0.1
@@ -136,6 +140,9 @@ services:
       - ./.opencode-state/config:/home/op/.config/opencode:rw
       - ./.opencode-state/cache:/home/op/.cache:rw
       - ./.opencode-state/npm:/home/op/.npm:rw
+      # Host-only OpenCode Web password directory; entrypoint copies only the
+      # password into /run tmpfs with op:op 0600 before starting the server.
+      - ./.opencode-state/web-auth:/awoki-web-auth:ro
       - awoki_nvim_share:/home/op/.local/share/nvim
       - awoki_nvim_state:/home/op/.local/state/nvim
       - awoki_ssh_host_keys:/etc/awoki-ssh-host-keys

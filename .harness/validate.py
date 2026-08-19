@@ -126,6 +126,10 @@ def validate_compose_shape(path: Path, expected_services: list[str] | None = Non
         assert env.get("AWOKI_SSH_AUTHORIZED_KEY") == "${AWOKI_SSH_AUTHORIZED_KEY:-}", (
             "OpenCode SSH must receive only the launcher-derived public key through environment"
         )
+        assert env.get("AWOKI_OPENCODE_WEB_ENABLED") == "${AWOKI_OPENCODE_WEB_ENABLED:-1}", "OpenCode Web must be enabled by default"
+        assert env.get("AWOKI_OPENCODE_WEB_PORT") == "${AWOKI_OPENCODE_WEB_PORT:-4096}", "OpenCode Web port must be configurable"
+        assert env.get("AWOKI_OPENCODE_WEB_USERNAME") == "${AWOKI_OPENCODE_WEB_USERNAME:-opencode}", "OpenCode Web username must be configurable"
+        assert "AWOKI_OPENCODE_WEB_PASSWORD" not in env and "OPENCODE_SERVER_PASSWORD" not in env, "OpenCode Web password must not be stored in Compose service environment"
         assert not any(
             isinstance(v, dict) and v.get("source") == "./.ssh-container/authorized_keys"
             for v in volumes
@@ -133,9 +137,11 @@ def validate_compose_shape(path: Path, expected_services: list[str] | None = Non
         assert any(".opencode-state/share:/home/op/.local/share/opencode:rw" in str(v) for v in volumes), "OpenCode share state must persist"
         assert any(".opencode-state/local-state:/home/op/.local/state/opencode:rw" in str(v) for v in volumes), "OpenCode local state must persist"
         assert any(".opencode-state/cache:/home/op/.cache:rw" in str(v) for v in volumes), "OpenCode plugin/package cache must persist"
+        assert any(".opencode-state/web-auth:/awoki-web-auth:ro" in str(v) for v in volumes), "OpenCode Web auth directory must be mounted read-only"
         assert not any(".ssh-container/authorized_keys" in str(v) for v in volumes), "authorized_keys host-file binds must be absent"
         ports = svc.get("ports", [])
         assert any(str(p).startswith("127.0.0.1:") and "${AWOKI_OPENCODE_SSH_PORT:-2222}:22" in str(p) for p in ports), "OpenCode SSH host port must be configurable and loopback-only"
+        assert any(str(p).startswith("127.0.0.1:") and "${AWOKI_OPENCODE_WEB_PORT:-4096}" in str(p) for p in ports), "OpenCode Web must be published only on host loopback"
         assert any(str(p).startswith("127.0.0.1:") and "${AWOKI_LAVISH_PORT:-4387}" in str(p) for p in ports), "Lavish must be published only on host loopback"
         assert env.get("LAVISH_AXI_NO_OPEN") == "1", "Lavish must not try to open a browser inside the container"
         assert env.get("AWOKI_LAVISH_VERSION") == "${AWOKI_LAVISH_VERSION:-0.1.43}", "Lavish version must be pinned by default"
@@ -144,7 +150,11 @@ def validate_compose_shape(path: Path, expected_services: list[str] | None = Non
 def validate_launcher() -> None:
     script = (ROOT / ".harness" / "bin" / "run-opencode-ssh").read_text(encoding="utf-8")
     assert "AWOKI_OPENCODE_SSH_PORT" in script, "SSH launcher must honor AWOKI_OPENCODE_SSH_PORT"
-    assert "SSH port 127.0.0.1:$SSH_PORT is already in use" in script, "SSH launcher must preflight port conflicts"
+    assert "AWOKI_OPENCODE_WEB_ENABLED" in script and "AWOKI_OPENCODE_WEB_PORT" in script, "SSH launcher must configure OpenCode Web"
+    assert 'prepare-opencode-web-auth"' in script, "SSH launcher must materialize the host-only OpenCode Web secret before Compose"
+    assert 'opencode-web-health"' in script, "SSH launcher must health-check the authenticated OpenCode Web endpoint"
+    assert 'check_published_port "SSH" "$SSH_PORT"' in script, "SSH launcher must preflight SSH port conflicts"
+    assert 'check_published_port "OpenCode Web" "$WEB_PORT"' in script, "SSH launcher must preflight Web port conflicts"
     assert 'opencode-ssh-public-key")"' in script, "SSH launcher must derive and export the validated public key before Compose starts"
     assert 'export AWOKI_SSH_AUTHORIZED_KEY' in script, "SSH launcher must export only the public key to Compose"
     helper = (ROOT / ".harness" / "bin" / "prepare-opencode-ssh-keys").read_text(encoding="utf-8")
@@ -174,6 +184,10 @@ def validate_layout_files() -> None:
         ROOT / ".harness" / "bin" / "init-layout",
         ROOT / ".harness" / "bin" / "prepare-opencode-ssh-keys",
         ROOT / ".harness" / "bin" / "opencode-ssh-public-key",
+        ROOT / ".harness" / "bin" / "prepare-opencode-web-auth",
+        ROOT / ".harness" / "bin" / "opencode-web-password",
+        ROOT / ".harness" / "bin" / "opencode-web-health",
+        ROOT / ".harness" / "bin" / "awoki-opencode",
         ROOT / ".harness" / "index" / "README.md",
         ROOT / ".harness" / "state" / "README.md",
         ROOT / ".harness" / "artifacts" / "burp" / "README.md",
@@ -492,6 +506,13 @@ def validate_continuity_contract() -> None:
         cfg = json.loads(_strip_jsonc((ROOT / cfg_name).read_text(encoding="utf-8")))
         assert "docs/RELIABILITY.md" in cfg.get("instructions", []), f"{cfg_name} must always load reliability rules"
         assert cfg.get("permission", {}).get("skill", {}).get("*") == "allow", f"{cfg_name} must allow project skills"
+    runtime_snapshot = (ROOT / ".harness" / "bin" / "awoki-runtime-snapshot").read_text(encoding="utf-8")
+    assert "AWOKI_OPENCODE_WEB_ENABLED" in runtime_snapshot and "AWOKI_OPENCODE_WEB_PORT" in runtime_snapshot, "runtime snapshot must carry non-secret Web routing config"
+    assert "AWOKI_OPENCODE_WEB_PASSWORD" not in runtime_snapshot and "OPENCODE_SERVER_PASSWORD" not in runtime_snapshot, "runtime snapshot must never persist the Web password"
+    web_client = (ROOT / ".harness" / "bin" / "awoki-opencode").read_text(encoding="utf-8")
+    assert "opencode attach" in web_client, "Awoki TUI wrapper must attach to the shared OpenCode Web backend"
+    assert '--password' not in web_client and '-p ' not in web_client, "Awoki TUI wrapper must not put the Web password in process arguments"
+
     manifest = json.loads((ROOT / ".harness" / "manifest.json").read_text(encoding="utf-8"))
     preferred = manifest.get("projects", {}).get("preferred_tools", [])
     assert preferred == ["project_open", "project_capture", "project_search", "project_refresh", "code_index_refresh_status", "code_index_refresh_start", "code_vector_refresh_status", "code_vector_refresh_start", "project_pause", "project_status", "repository_prepare_start", "repository_prepare_status", "repository_prepare_cancel"], "preferred continuity surface drifted"
@@ -550,6 +571,7 @@ def validate_backup_contract() -> None:
         ".opencode-state/config": "sensitive_opt_in",
         ".opencode-state/cache": "excluded_cache",
         ".opencode-state/npm": "excluded_cache",
+        ".opencode-state/web-auth": "sensitive_opt_in",
     }
     discovered: set[str] = set()
     for compose_name in ("docker-compose.yml", "docker-compose.opencode.yml"):

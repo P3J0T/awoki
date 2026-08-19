@@ -37,6 +37,7 @@ mkdir -p \
   "$ROOT/.opencode-state/config" \
   "$ROOT/.opencode-state/cache" \
   "$ROOT/.opencode-state/npm" \
+  "$ROOT/.opencode-state/web-auth" \
   "$ROOT/.ssh-container" \
   "$GLOBAL_ROOT/global" \
   "$GLOBAL_ROOT/skills" \

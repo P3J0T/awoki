@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "updated_at": "2026-08-16",
+  "updated_at": "2026-08-19",
   "update_policy": "OpenCode resolves at image build according to the selected latest|safe policy; the resolved CLI/plugin/SDK versions are recorded inside the immutable image. Other critical runtime defaults remain reviewed here.",
   "critical_runtime": {
     "opencode_cli": {
@@ -10,7 +10,7 @@
       "install_policy": "latest-by-default-or-explicit-safe-version",
       "default_channel": "latest",
       "safe_version_source": "operator supplied AWOKI_OPENCODE_SAFE_VERSION / --opencode-safe VERSION",
-      "compatibility_note": "Fresh Awoki OpenCode image builds resolve the current npm latest unless safe mode supplies an exact version. The resolved version is recorded in /usr/local/share/awoki/opencode-runtime.json. Auto-update remains disabled inside a running container."
+      "compatibility_note": "Fresh Awoki OpenCode image builds resolve the current npm latest unless safe mode supplies an exact version. The resolved version is recorded in /usr/local/share/awoki/opencode-runtime.json. Auto-update remains disabled inside a running container. The runtime compatibility gate also requires the resolved CLI to expose the reviewed web/attach authentication surfaces used by Awoki shared-backend mode."
     },
     "opencode_plugin_api": {
       "package": "@opencode-ai/plugin",

@@ -48,6 +48,7 @@ def make_root(base: Path, name: str = "awoki") -> Path:
     (root / ".awoki-global" / "skills").mkdir(parents=True)
     (root / ".opencode-state" / "share").mkdir(parents=True)
     (root / ".opencode-state" / "cache").mkdir(parents=True)
+    (root / ".opencode-state" / "web-auth").mkdir(parents=True)
     (root / ".ssh-container").mkdir(parents=True)
 
     (root / "workspace" / "projects" / "demo" / "memory" / "continuity.jsonl").write_text(
@@ -79,6 +80,7 @@ def make_root(base: Path, name: str = "awoki") -> Path:
     (root / "workspace" / ".lavish" / "state" / "session.json").write_text("lavish-runtime", encoding="utf-8")
     (root / ".opencode-state" / "share" / "session.json").write_text("session", encoding="utf-8")
     (root / ".opencode-state" / "cache" / "cache.bin").write_bytes(b"cache")
+    (root / ".opencode-state" / "web-auth" / "password").write_text("web-secret", encoding="utf-8")
     (root / ".ssh-container" / "id_ed25519").write_text("private-key", encoding="utf-8")
     (root / ".env").write_text(
         "AWOKI_GLOBAL_ROOT=" + str(root / ".awoki-global") + "\n"
@@ -167,6 +169,7 @@ class BackupTests(unittest.TestCase):
             self.assertIn("awoki-backup/payload/dotenv", names)
             self.assertIn("awoki-backup/payload/ssh_container/id_ed25519", names)
             self.assertIn("awoki-backup/payload/opencode_state/share/session.json", names)
+            self.assertIn("awoki-backup/payload/opencode_state/web-auth/password", names)
             self.assertFalse(any("opencode_state/cache" in name for name in names))
 
     def test_verify_detects_tampering(self):

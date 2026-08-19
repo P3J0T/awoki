@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.server
 import json
@@ -161,6 +162,146 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertEqual(len(lines), 1)
             self.assertTrue(lines[0].startswith("ssh-ed25519 "), lines[0])
             self.assertFalse((root / ".ssh-container" / "authorized_keys").exists())
+
+
+    def test_opencode_web_auth_bootstrap_generates_mode_0600_secret_and_preserves_it(self) -> None:
+        helper = ROOT / ".harness" / "bin" / "prepare-opencode-web-auth"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "awoki"
+            root.mkdir()
+            env = {**os.environ, "AWOKI_ROOT": str(root)}
+            first = subprocess.run([str(helper)], env=env, text=True, capture_output=True, check=False, timeout=10)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            auth_dir = root / ".opencode-state" / "web-auth"
+            password_file = auth_dir / "password"
+            first_password = password_file.read_text(encoding="utf-8")
+            self.assertGreaterEqual(len(first_password), 32)
+            self.assertNotIn("\n", first_password)
+            self.assertEqual(stat.S_IMODE((root / ".opencode-state").stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(auth_dir.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(password_file.stat().st_mode), 0o600)
+            self.assertEqual(password_file.stat().st_nlink, 1)
+
+            second = subprocess.run([str(helper)], env=env, text=True, capture_output=True, check=False, timeout=10)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(password_file.read_text(encoding="utf-8"), first_password)
+
+    def test_opencode_web_auth_explicit_override_and_symlink_rejection(self) -> None:
+        helper = ROOT / ".harness" / "bin" / "prepare-opencode-web-auth"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "awoki"
+            root.mkdir()
+            env = {**os.environ, "AWOKI_ROOT": str(root), "AWOKI_OPENCODE_WEB_PASSWORD": "awoki-test-password"}
+            completed = subprocess.run([str(helper)], env=env, text=True, capture_output=True, check=False, timeout=10)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            password_file = root / ".opencode-state" / "web-auth" / "password"
+            self.assertEqual(password_file.read_text(encoding="utf-8"), "awoki-test-password")
+
+            outside = root / "outside"
+            outside.write_text("secret", encoding="utf-8")
+            password_file.unlink()
+            password_file.symlink_to(outside)
+            rejected = subprocess.run([str(helper)], env={**os.environ, "AWOKI_ROOT": str(root)}, text=True, capture_output=True, check=False, timeout=10)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("must not be a symlink", rejected.stderr)
+
+    def test_opencode_web_auth_rejects_hardlinked_password_file(self) -> None:
+        helper = ROOT / ".harness" / "bin" / "prepare-opencode-web-auth"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "awoki"
+            root.mkdir()
+            env = {**os.environ, "AWOKI_ROOT": str(root)}
+            first = subprocess.run([str(helper)], env=env, text=True, capture_output=True, check=False, timeout=10)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            password_file = root / ".opencode-state" / "web-auth" / "password"
+            hardlink = root / "password-hardlink"
+            hardlink.hardlink_to(password_file)
+            rejected = subprocess.run([str(helper)], env=env, text=True, capture_output=True, check=False, timeout=10)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("must not be hard-linked", rejected.stderr)
+
+    def test_opencode_web_compose_is_loopback_only_and_password_is_not_compose_env(self) -> None:
+        compose = (ROOT / "docker-compose.opencode.yml").read_text(encoding="utf-8")
+        self.assertIn('127.0.0.1:${AWOKI_OPENCODE_WEB_PORT:-4096}:${AWOKI_OPENCODE_WEB_PORT:-4096}', compose)
+        self.assertIn('AWOKI_OPENCODE_WEB_ENABLED: ${AWOKI_OPENCODE_WEB_ENABLED:-1}', compose)
+        self.assertIn('AWOKI_OPENCODE_WEB_USERNAME: ${AWOKI_OPENCODE_WEB_USERNAME:-opencode}', compose)
+        self.assertIn('./.opencode-state/web-auth:/awoki-web-auth:ro', compose)
+        self.assertNotIn('AWOKI_OPENCODE_WEB_PASSWORD:', compose)
+        self.assertNotIn('OPENCODE_SERVER_PASSWORD:', compose)
+
+    def test_awoki_opencode_attach_uses_runtime_secret_without_password_argv(self) -> None:
+        client = (ROOT / ".harness" / "bin" / "awoki-opencode").read_text(encoding="utf-8")
+        self.assertIn('opencode attach "http://127.0.0.1:${AWOKI_OPENCODE_WEB_PORT:-4096}"', client)
+        self.assertIn('export OPENCODE_SERVER_PASSWORD="$(cat "$password_file")"', client)
+        self.assertNotIn('--password', client)
+        self.assertNotIn('-p "$password', client)
+
+    def test_opencode_web_entrypoint_uses_tmpfs_secret_and_headless_browser_shim(self) -> None:
+        entrypoint = (ROOT / ".harness" / "bin" / "opencode-ssh-entrypoint").read_text(encoding="utf-8")
+        self.assertIn('install -o op -g op -m 0600 "$web_host_password" "$web_runtime_password"', entrypoint)
+        self.assertIn('/run/awoki/opencode-web-bin/xdg-open', entrypoint)
+        self.assertIn('OPENCODE_SERVER_PASSWORD="$(cat "$password_file")"', entrypoint)
+        self.assertNotIn('OPENCODE_SERVER_PASSWORD="$web_password"', entrypoint)
+        self.assertIn('exec opencode web --hostname 0.0.0.0 --port "$AWOKI_OPENCODE_WEB_PORT"', entrypoint)
+        self.assertIn('opencode-web-health', entrypoint)
+        snapshot = (ROOT / ".harness" / "bin" / "awoki-runtime-snapshot").read_text(encoding="utf-8")
+        self.assertNotIn("AWOKI_OPENCODE_WEB_PASSWORD", snapshot)
+        self.assertNotIn("OPENCODE_SERVER_PASSWORD", snapshot)
+
+    def test_opencode_web_health_probe_requires_basic_auth_and_parses_version(self) -> None:
+        username = "opencode"
+        password = "unit-test-secret"
+        expected_auth = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                if self.path != "/global/health" or self.headers.get("Authorization") != expected_auth:
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                body = json.dumps({"healthy": True, "version": "test-version"}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):  # noqa: A003
+                return
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                password_file = Path(td) / "password"
+                password_file.write_text(password, encoding="utf-8")
+                password_file.chmod(0o600)
+                completed = subprocess.run(
+                    [
+                        str(ROOT / ".harness" / "bin" / "opencode-web-health"),
+                        "--url", f"http://127.0.0.1:{server.server_port}",
+                        "--username", username,
+                        "--password-file", str(password_file),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn("awoki_opencode_web=ok version=test-version", completed.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_opencode_runtime_compatibility_checks_web_and_attach_surfaces(self) -> None:
+        compat = (ROOT / ".harness" / "bin" / "opencode-runtime-compat-check").read_text(encoding="utf-8")
+        self.assertIn("opencode web --help", compat)
+        self.assertIn("opencode attach --help", compat)
+        self.assertIn("--hostname", compat)
+        self.assertIn("--password", compat)
+
 
 
     def test_mcp_version_guard_accepts_v1_and_rejects_v2(self) -> None:

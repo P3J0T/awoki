@@ -6,20 +6,22 @@ This is the preferred workflow when OpenCode must not run on the host.
 
 ```text
 macOS host
+  ├─ browser -> OpenCode Web on 127.0.0.1:4096
   ├─ Burp MCP on 127.0.0.1:9876
   └─ SSH client to 127.0.0.1:2222
 
 Docker networks
   ├─ awoki-data (internal): qdrant at http://qdrant:6333
   └─ awoki-egress: awoki-opencode-ssh remote endpoint and host access
-       OpenCode TUI
+       one OpenCode Web/server backend
+       SSH TUI via `awoki-opencode` -> `opencode attach`
        Awoki MCP local child process
        Neovim and tmux
        immutable /awoki source
        explicit writable runtime mounts
 ```
 
-OpenCode runs inside `awoki-opencode-ssh`. Awoki MCP runs locally inside the same container through `.harness/bin/mcp-auto`; Docker-in-Docker and the Docker socket are not used.
+OpenCode runs inside `awoki-opencode-ssh`. With the stock `AWOKI_OPENCODE_WEB_ENABLED=1`, the entrypoint starts one authenticated `opencode web` backend and supervises it alongside `sshd`; `awoki-opencode` attaches the SSH TUI to that same backend so browser/TUI share OpenCode session state. Awoki MCP runs locally inside the same container through `.harness/bin/mcp-auto`; Docker-in-Docker and the Docker socket are not used.
 
 ## Install and connect
 
@@ -27,12 +29,14 @@ OpenCode runs inside `awoki-opencode-ssh`. Awoki MCP runs locally inside the sam
 cp .env.example .env
 ./init-awoki.sh
 make install-opencode-ssh
+make opencode-web-password   # explicit secret display; username defaults to opencode
+# Browser: http://127.0.0.1:${AWOKI_OPENCODE_WEB_PORT:-4096}
 ssh -i .ssh-container/id_ed25519 -p ${AWOKI_OPENCODE_SSH_PORT:-2222} op@127.0.0.1
 cd /awoki
-opencode
+awoki-opencode
 ```
 
-Run plain `opencode` from `/awoki`. Project configuration is `opencode.jsonc`; project skills and commands are under `.opencode/`.
+`awoki-opencode` is the supported interactive wrapper. With Web enabled it loads the runtime-only password from `/run/awoki/opencode-web-password` and executes `opencode attach` without putting the password in process arguments. With `AWOKI_OPENCODE_WEB_ENABLED=0` it falls back to standalone `opencode`. Project configuration remains `opencode.jsonc`; project skills and commands are under `.opencode/`.
 
 Fresh image builds resolve OpenCode in **latest / untested** mode by default. The CLI is
 resolved first, then `@opencode-ai/plugin` and `@opencode-ai/sdk` are materialized at the
@@ -61,7 +65,7 @@ Remote embeddings: operator-configured OpenAI-compatible endpoint
 Remote reranker: optional operator-configured endpoint
 ```
 
-Qdrant host ports and SSH are published only on macOS loopback. No host network mode is required.
+Qdrant host ports, SSH, OpenCode Web, and Lavish are published only on macOS loopback. OpenCode Web binds `0.0.0.0` only inside the container so Docker can forward the loopback host port; mDNS is not enabled. Non-loopback Web exposure is intentionally out of scope until an authenticated TLS reverse-proxy design is added. No host network mode is required.
 
 ## Writable mounts
 
@@ -80,10 +84,26 @@ Awoki source is baked into the image. The normal service mounts only:
 .opencode-state/config          -> OpenCode user configuration
 .opencode-state/cache           -> OpenCode/plugin and Neovim caches
 .opencode-state/npm             -> npm/npx cache
+.opencode-state/web-auth          -> read-only `/awoki-web-auth`; generated Web password at rest
 host-generated SSH public key    -> injected through `AWOKI_SSH_AUTHORIZED_KEY` and installed as `/home/op/.ssh/authorized_keys` at container start
 named volume                   -> persistent SSH server host keys
 named volumes                  -> Neovim data/state
 ```
+
+
+### OpenCode Web authentication and file permissions
+
+The stock Web path does not use a fixed `awoki` password. `run-opencode-ssh` calls `.harness/bin/prepare-opencode-web-auth`, which secures the host `.opencode-state/` root as `0700`, creates `.opencode-state/web-auth/` as `0700`, and keeps its password file as a single-link regular file with mode `0600`. The password is generated with Python `secrets.token_urlsafe(32)` unless the operator explicitly sets `AWOKI_OPENCODE_WEB_PASSWORD`. Existing generated passwords are preserved across normal starts. Symlinked/non-regular auth paths and hard-linked password files are rejected.
+
+Compose mounts the auth **directory** read-only at `/awoki-web-auth` rather than binding the password as a single host file. At container start, root validates that source and copies only the password into `/run/awoki/opencode-web-password` on tmpfs as `op:op 0600`. The plaintext is then supplied to OpenCode through `OPENCODE_SERVER_PASSWORD` only in the Web/attach process environment because OpenCode's built-in HTTP Basic Auth requires the original password and does not accept a hash. It is deliberately absent from `docker compose config`, the service environment, the runtime snapshot, and process arguments; the Web child reads the tmpfs file itself before exporting the secret into its own environment. Same-`op` processes are not considered isolated from one another; this improves accidental exposure, not hostile same-user isolation.
+
+Retrieve the current password deliberately with:
+
+```bash
+make opencode-web-password
+```
+
+An explicit `AWOKI_OPENCODE_WEB_PASSWORD=...` override is supported, including a weak value such as `awoki` for disposable loopback-only testing, but it is not the default. For stronger at-rest storage, the backlog tracks a future macOS Keychain/secret-broker integration that can materialize the secret only at runtime.
 
 
 ### macOS / Docker Desktop SSH-key bootstrap
@@ -138,10 +158,10 @@ After SSH login:
 ```bash
 cd /awoki
 tmux new -A -s awoki
-opencode
+awoki-opencode
 ```
 
-`tmux new -A -s awoki` is intentionally idempotent for normal use: it creates the session on the first login and reattaches on later logins. If SSH drops while OpenCode is running, reconnect and run the same command; do not recreate the container just to get the terminal back.
+`tmux new -A -s awoki` is intentionally idempotent for normal use: it creates the terminal session on the first login and reattaches on later logins. The OpenCode Web backend is a separate entrypoint-managed process, so it remains available to the browser even if SSH/tmux disappears. If SSH drops, reconnect and run the same tmux plus `awoki-opencode` commands; do not recreate the container just to recover the terminal.
 
 Detach deliberately with `<prefix> d`. Both `Ctrl-b` and `Ctrl-a` are valid prefixes, so `Ctrl-b d` and `Ctrl-a d` both work. The OpenCode process continues inside tmux after detach.
 
@@ -156,7 +176,7 @@ awoki:4  logs
 
 Create extra windows with `<prefix> c` and switch with normal tmux bindings. The default Neovim configuration is intentionally minimal and loads no plugin manager or third-party code. tmux uses a vendored gpakosz/Oh my tmux! snapshot: the upstream main file is root-owned under `/opt/oh-my-tmux`, `/home/op/.tmux.conf` links to it, and `/home/op/.tmux.conf.local` is the writable Awoki customization layer. No remote installer runs during container startup.
 
-**Persistence boundary:** tmux sessions survive SSH disconnects but do not survive container stop/recreation. After `make opencode-recreate`, SSH into the new container, create/attach `awoki` again, and start a new `opencode` process. Awoki project state, indices/evidence, and mounted OpenCode application state are separate durable stores; tmux only preserves the live terminal/process while that container exists.
+**Persistence boundary:** tmux sessions survive SSH disconnects but do not survive container stop/recreation. The Web backend also ends on container recreation and is restarted by the entrypoint; OpenCode application/session data remains on the mounted `.opencode-state` paths. After `make opencode-recreate`, SSH into the new container, create/attach `awoki` again, and run `awoki-opencode` to attach to the restarted backend.
 
 Use `<prefix> r` to reload and `<prefix> e` to edit the local tmux layer. Edits made inside the running container are lost on recreation; persist them in `.harness/config/tmux.conf.local` and rebuild. Awoki retains the current path in new sessions/windows/panes, enables mouse and vi copy mode, keeps 100,000 history lines, and leaves OS clipboard forwarding disabled. The image build and entrypoint run `.harness/bin/tmux-check` as a startup smoke test; `make opencode-runtime-check` repeats the tmux and MCP checks against a running container.
 

@@ -318,7 +318,7 @@ SSH authorized key and server-host-key volume. Host initialization creates the a
 Qdrant data remains in `./data/qdrant`; initialization explicitly creates `data/qdrant/collections/` so collection materialization has a valid parent on bind-mounted filesystems. Qdrant joins only the internal `awoki-data` network; Awoki/OpenCode also joins `awoki-egress` for remote embeddings, reranking, and host Burp MCP. Neovim and tmux are installed; the shipped Neovim configuration loads no third-party plugins.
 
 
-The OpenCode SSH image pins Node 22 for OpenCode and ad-hoc Lavish compatibility.
+The OpenCode SSH image pins Node 22 for OpenCode and ad-hoc Lavish compatibility. The preferred runtime starts one authenticated OpenCode Web backend by default and uses `awoki-opencode`/`opencode attach` for the SSH TUI so browser and terminal share sessions. Web is host-loopback-only; its generated password is outside Compose/runtime snapshots and is copied from a 0600 ignored host file into `/run` tmpfs.
 
 
 ## Generic long-running task continuity

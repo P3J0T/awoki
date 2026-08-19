@@ -208,12 +208,13 @@ Fresh builds default to **latest / untested** OpenCode. The build resolves the C
 
 Operators can select any exact last-known-good version with safe mode. Awoki should fail on real interface incompatibility, not because a static historical version number changed.
 
-Runtime structural metadata records the resolved CLI/plugin/SDK tuple for diagnosis.
+Runtime structural metadata records the resolved CLI/plugin/SDK tuple for diagnosis. The preferred container runtime also verifies that the resolved CLI exposes compatible `web` and `attach` surfaces, starts one authenticated Web backend by default, and has SSH clients attach to that shared server instead of spawning a second OpenCode backend.
 
 ## Security/runtime boundaries
 
 - No Docker socket in OpenCode container.
 - No privileged/host-network/host-PID deployment in normal topology.
+- OpenCode Web is host-loopback-only by default, with mDNS disabled; its generated Basic-Auth secret is stored in ignored 0600 host state, copied to container tmpfs, and omitted from Compose/runtime snapshots/argv.
 - Source baked into image; only explicit runtime domains writable.
 - Remote embedding is explicit materialization intent, not a side effect of opening a project.
 - Target-repository Git/search subprocesses strip provider credentials and ambient loader/interpreter/SSH-agent overrides as defense in depth.

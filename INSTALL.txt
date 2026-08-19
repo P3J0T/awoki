@@ -10,7 +10,8 @@ an Awoki release number in its title.
 Topology
 
   host
-    -> SSH -> awoki-opencode-ssh container (OpenCode + Awoki MCP)
+    -> browser -> 127.0.0.1:4096 -> authenticated OpenCode Web
+    -> SSH -> awoki-opencode-ssh container (attached TUI + Awoki MCP)
     -> optional Burp MCP on host loopback
     -> optional remote embedding/reranker endpoints
 
@@ -71,7 +72,9 @@ only when you intend to use a remote reranker.
 This creates the ignored runtime layout, including workspace/, data/,
 .ssh-container/, .opencode-state/, and .harness/state/. The SSH client key pair
 is generated on the host. At runtime Awoki injects only the validated public key
-into the container; the private key remains host-only.
+into the container; the private key remains host-only. OpenCode Web auth is
+materialized by the guarded launcher: an empty stock password setting generates
+a persistent random `.opencode-state/web-auth/password` with mode 0600 under 0700 state/auth directories.
 
 4. Run host preflight:
 
@@ -85,7 +88,10 @@ into the container; the private key remains host-only.
 By default a fresh image resolves the current OpenCode CLI and aligns the local
 OpenCode plugin/SDK packages to that exact resolved version. This is
 "latest / untested" until your own validation proves the stack acceptable.
-The running container does not silently auto-update.
+The running container does not silently auto-update. OpenCode Web is enabled by
+default and published only on host loopback at http://127.0.0.1:4096. Show its
+password explicitly with `make opencode-web-password`; the username defaults to
+`opencode`.
 
 6. Validate the running OpenCode runtime only after step 5 succeeds:
 
@@ -99,15 +105,19 @@ started container; secondary runtime errors can hide the original startup proble
 
   ssh -i .ssh-container/id_ed25519 -p 2222 op@127.0.0.1
 
-8. Inside the container, start or reattach the recommended tmux session, then run
-OpenCode:
+8. Inside the container, start or reattach the recommended tmux session, then
+attach the TUI to the already-running Web backend:
 
   cd /awoki
   tmux new -A -s awoki
-  opencode
+  awoki-opencode
 
-Do not use a custom --config path for normal operation. /awoki/opencode.jsonc is
-the project configuration and loads Awoki through the reviewed MCP launcher.
+`awoki-opencode` uses `opencode attach` when Web is enabled, so browser and TUI
+share sessions/state. It supplies Basic-Auth through process environment, not a
+`--password` argument. With AWOKI_OPENCODE_WEB_ENABLED=0 it runs standalone
+`opencode`. Do not use a custom --config path for normal operation.
+/awoki/opencode.jsonc is the project configuration and loads Awoki through the
+reviewed MCP launcher.
 
 Why tmux
 
@@ -130,9 +140,9 @@ Inside the container:
   cd /awoki
   tmux new -A -s awoki
 
-If OpenCode is not already running in the attached tmux session:
+If the attached TUI is not already running in the tmux session:
 
-  opencode
+  awoki-opencode
 
 If SSH drops, reconnect and repeat only the SSH + tmux commands. Do not restart or
 recreate the container merely to recover the terminal.
@@ -148,10 +158,11 @@ Stop the deployment only when you actually want the container/Qdrant services do
 
   make opencode-ssh-down
 
-After `make opencode-recreate`, the old tmux/OpenCode processes are gone. SSH into
-the new container, run `tmux new -A -s awoki`, and start `opencode` again. Durable
-Awoki/project/OpenCode state lives on the configured host mounts; tmux itself is only
-a process/session wrapper.
+After `make opencode-recreate`, the old tmux/backend processes are gone. The new
+container starts a fresh Web backend against the persisted OpenCode state. SSH in,
+run `tmux new -A -s awoki`, and start `awoki-opencode` again. Durable Awoki/project/
+OpenCode state lives on the configured host mounts; tmux itself is only a terminal
+session wrapper.
 
 Rebuild after an Awoki update
 
@@ -259,8 +270,18 @@ Environment notes
 
 The stock .env.example keeps:
 
+  AWOKI_OPENCODE_WEB_ENABLED=1
+  AWOKI_OPENCODE_WEB_PORT=4096
+  AWOKI_OPENCODE_WEB_USERNAME=opencode
+  AWOKI_OPENCODE_WEB_PASSWORD=
   AWOKI_RERANK_ENABLED=0
   AWOKI_CODE_RERANK_TIMEOUT_SECONDS=
+
+Leaving the Web password empty is intentional: the host launcher generates and
+persists a strong random secret. An explicit plaintext override is supported for
+local testing, but OpenCode Basic Auth cannot consume a password hash. The stock
+path therefore keeps plaintext out of Compose metadata/argv and only in the 0600
+host auth file plus container `/run` tmpfs/process environment.
 
 An empty AWOKI_CODE_RERANK_TIMEOUT_SECONDS inherits AWOKI_RERANK_TIMEOUT_SECONDS.
 

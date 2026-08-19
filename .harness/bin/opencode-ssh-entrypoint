@@ -90,7 +90,54 @@ for path in \
 done
 [[ -e /awoki/.harness/notes.md ]] && chown op:op /awoki/.harness/notes.md 2>/dev/null || true
 
-# Refresh the allowlisted runtime snapshot used by clean SSH/MCP shells.
+web_enabled=0
+case "${AWOKI_OPENCODE_WEB_ENABLED:-1}" in
+  1|true|TRUE|yes|YES|on|ON) web_enabled=1 ;;
+  0|false|FALSE|no|NO|off|OFF) web_enabled=0 ;;
+  *) echo "[awoki] invalid AWOKI_OPENCODE_WEB_ENABLED=${AWOKI_OPENCODE_WEB_ENABLED}" >&2; exit 2 ;;
+esac
+web_port="${AWOKI_OPENCODE_WEB_PORT:-4096}"
+web_username="${AWOKI_OPENCODE_WEB_USERNAME:-opencode}"
+if [[ ! "$web_port" =~ ^[0-9]+$ ]] || (( web_port < 1 || web_port > 65535 )); then
+  echo "[awoki] invalid AWOKI_OPENCODE_WEB_PORT: $web_port" >&2
+  exit 2
+fi
+if [[ ! "$web_username" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "[awoki] invalid AWOKI_OPENCODE_WEB_USERNAME: use letters, digits, dot, underscore, or dash" >&2
+  exit 2
+fi
+
+web_runtime_password=/run/awoki/opencode-web-password
+if (( web_enabled )); then
+  web_host_password=/awoki-web-auth/password
+  if [[ ! -f "$web_host_password" || -L "$web_host_password" ]]; then
+    echo "[awoki] OpenCode Web is enabled but the host password file is missing or unsafe: $web_host_password" >&2
+    echo "[awoki] start through ./run-opencode.sh so the host-side 0600 secret is prepared" >&2
+    exit 1
+  fi
+  install -d -o root -g "$(id -g op)" -m 0750 /run/awoki
+  install -o op -g op -m 0600 "$web_host_password" "$web_runtime_password"
+  python3 - "$web_runtime_password" <<'PY_WEB_SECRET'
+from pathlib import Path
+import sys
+value = Path(sys.argv[1]).read_text(encoding="utf-8")
+if not value or "\n" in value or "\r" in value:
+    raise SystemExit("[awoki] OpenCode Web password must be a non-empty single line")
+PY_WEB_SECRET
+
+  # OpenCode Web currently attempts to invoke xdg-open. Keep that convenience
+  # process-local and harmless in the headless container instead of installing a
+  # desktop/browser stack or globally shadowing xdg-open.
+  install -d -o root -g root -m 0755 /run/awoki/opencode-web-bin
+  cat >/run/awoki/opencode-web-bin/xdg-open <<'EOF_XDG'
+#!/bin/sh
+exit 0
+EOF_XDG
+  chmod 0755 /run/awoki/opencode-web-bin/xdg-open
+fi
+
+# Refresh the allowlisted runtime snapshot used by clean SSH/MCP shells. The
+# OpenCode Web password is deliberately not part of this snapshot.
 /awoki/.harness/bin/awoki-runtime-snapshot >/dev/null
 
 # Validate runtime surfaces that otherwise fail only after SSH login: the resolved
@@ -123,4 +170,69 @@ if ! runuser -u op -- env -i HOME=/home/op USER=op LOGNAME=op \
   exit 1
 fi
 
-exec /usr/sbin/sshd -D -e
+if (( ! web_enabled )); then
+  exec /usr/sbin/sshd -D -e
+fi
+
+# Start the Web backend with a clean environment, but do not place the password
+# in runuser/env argv. The op-owned child reads the 0600 tmpfs file itself and
+# exports the plaintext only in its own environment because OpenCode Basic Auth
+# requires the original secret.
+runuser -u op -- env -i \
+  HOME=/home/op USER=op LOGNAME=op \
+  PATH=/run/awoki/opencode-web-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  TERM="${TERM:-xterm-256color}" LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+  AWOKI_ROOT=/awoki AWOKI_MODE=container-opencode HARNESS_ROOT=/awoki HARNESS_MODE=container-opencode \
+  OPENCODE_CONFIG_DIR=/awoki/.opencode OPENCODE_DISABLE_AUTOUPDATE=1 \
+  AWOKI_OPENCODE_WEB_PORT="$web_port" AWOKI_OPENCODE_WEB_USERNAME="$web_username" \
+  AWOKI_OPENCODE_WEB_RUNTIME_PASSWORD_FILE="$web_runtime_password" \
+  /bin/bash -c '
+    set -euo pipefail
+    password_file="${AWOKI_OPENCODE_WEB_RUNTIME_PASSWORD_FILE:?}"
+    [[ -f "$password_file" && ! -L "$password_file" ]] || exit 2
+    OPENCODE_SERVER_PASSWORD="$(cat "$password_file")"
+    export OPENCODE_SERVER_PASSWORD
+    export OPENCODE_SERVER_USERNAME="$AWOKI_OPENCODE_WEB_USERNAME"
+    exec opencode web --hostname 0.0.0.0 --port "$AWOKI_OPENCODE_WEB_PORT"
+  ' &
+web_pid=$!
+
+web_ready=0
+for _ in $(seq 1 30); do
+  if ! kill -0 "$web_pid" 2>/dev/null; then
+    wait "$web_pid" || true
+    echo "[awoki] OpenCode Web exited before becoming healthy" >&2
+    exit 1
+  fi
+  if /awoki/.harness/bin/opencode-web-health \
+      --url "http://127.0.0.1:${web_port}" \
+      --username "$web_username" \
+      --password-file "$web_runtime_password" \
+      --timeout 1 >/dev/null 2>&1; then
+    web_ready=1
+    break
+  fi
+  sleep 1
+done
+if (( ! web_ready )); then
+  kill "$web_pid" 2>/dev/null || true
+  wait "$web_pid" 2>/dev/null || true
+  echo "[awoki] OpenCode Web did not become healthy on 127.0.0.1:${web_port}" >&2
+  exit 1
+fi
+
+/usr/sbin/sshd -D -e &
+sshd_pid=$!
+cleanup() {
+  trap - EXIT INT TERM
+  kill "$sshd_pid" "$web_pid" 2>/dev/null || true
+  wait "$sshd_pid" 2>/dev/null || true
+  wait "$web_pid" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+set +e
+wait -n "$sshd_pid" "$web_pid"
+status=$?
+set -e
+cleanup
+exit "$status"

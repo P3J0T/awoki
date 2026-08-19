@@ -173,7 +173,8 @@ RUN set -eux; \
     npm install --prefix /awoki/.opencode --package-lock=false --save-exact "@opencode-ai/plugin@${resolved_opencode}" "@opencode-ai/sdk@${resolved_opencode}"; \
     chmod +x /awoki/.harness/bin/opencode-runtime-compat-check; \
     /awoki/.harness/bin/opencode-runtime-compat-check --materialize; \
-    chmod +x /usr/local/bin/opencode-ssh-entrypoint /awoki/.harness/bin/awoki-runtime-snapshot /awoki/.harness/bin/code-parser-check /awoki/.harness/bin/code-search-eval-check \
+    chmod +x /usr/local/bin/opencode-ssh-entrypoint /awoki/.harness/bin/awoki-runtime-snapshot /awoki/.harness/bin/code-parser-check /awoki/.harness/bin/code-search-eval-check /awoki/.harness/bin/opencode-web-health /awoki/.harness/bin/awoki-opencode \
+    && ln -sf /awoki/.harness/bin/awoki-opencode /usr/local/bin/awoki-opencode \
     && AWOKI_ROOT=/awoki HARNESS_ROOT=/awoki /awoki/.harness/bin/code-parser-check \
     && AWOKI_ROOT=/awoki HARNESS_ROOT=/awoki /awoki/.harness/bin/code-search-eval-check \
     && /usr/local/bin/awoki-go-semantics --version | grep -E '^awoki-go-semantics go1\.26\.5$' \

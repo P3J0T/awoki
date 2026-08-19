@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — OpenCode Web shared-backend runtime
+
+- Enables authenticated OpenCode Web by default on host loopback (`127.0.0.1:4096`) while retaining an explicit `AWOKI_OPENCODE_WEB_ENABLED=0` standalone SSH mode.
+- Secures the host `.opencode-state/` and Web auth directories to `0700` and generates a persistent random Web password in ignored `.opencode-state/web-auth/password` as a single-link `0600` file instead of shipping a fixed default; explicit operator overrides remain supported.
+- Mounts the auth directory read-only, copies the secret into container `/run` tmpfs as `op:op 0600`, and keeps it out of Compose service environment, runtime snapshots, diagnostics, and command-line arguments.
+- Adds `awoki-opencode`, which attaches the SSH TUI to the same Web backend so browser/TUI share OpenCode sessions and Awoki session identity.
+- Adds authenticated `/global/health` readiness, Web/attach CLI compatibility checks, headless-container browser-launch handling, port conflict checks, backup classification, runtime regressions, and operator documentation.
+- Tracks future platform secure-storage and authenticated TLS reverse-proxy work separately; OpenCode Basic Auth currently requires the plaintext password at process launch and does not accept a hash.
+
 Public releases use semantic versioning. The historical `R9.1.6.x` entries below are the internal pre-v0.1.0 development/stabilization line.
 
 ## v0.1.7 — Qdrant non-interactive readiness correction
