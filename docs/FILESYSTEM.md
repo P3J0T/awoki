@@ -137,7 +137,7 @@ Docker named volumes
 
 ## OpenCode runtime state
 
-The SSH workflow persists distinct OpenCode directories rather than mounting the host home directory: `.opencode-state/share`, `.opencode-state/local-state`, `.opencode-state/config`, `.opencode-state/cache`, and `.opencode-state/npm`. Neovim data/state and SSH server host keys use named volumes.
+The SSH workflow persists distinct OpenCode directories rather than mounting the host home directory: `.opencode-state/share`, `.opencode-state/local-state`, `.opencode-state/config`, `.opencode-state/cache`, and `.opencode-state/npm`. The host `.opencode-state/` root is secured to `0700`; `.opencode-state/web-auth/` is a separate ignored credential directory (`0700`, single-link password `0600`) mounted read-only only for Web bootstrap; the entrypoint copies the password into container `/run` tmpfs and does not place it in the general runtime snapshot. Neovim data/state and SSH server host keys use named volumes.
 
 
 ## Optional project Burp state

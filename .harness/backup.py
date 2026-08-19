@@ -81,6 +81,9 @@ TRACKED_RUNTIME_READMES = {
 
 CONFIG_KEYS = (
     "AWOKI_COMPOSE_PROJECT_NAME",
+    "AWOKI_OPENCODE_WEB_ENABLED",
+    "AWOKI_OPENCODE_WEB_PORT",
+    "AWOKI_OPENCODE_WEB_USERNAME",
     "AWOKI_EMBEDDING_PROVIDER",
     "AWOKI_EMBEDDING_MODEL",
     "AWOKI_EMBEDDING_DEPLOYMENT_ID",
@@ -229,6 +232,9 @@ def _nonsecret_config(root: Path) -> dict[str, str]:
     values, _ = _resolved_config(root)
     defaults = {
         "AWOKI_COMPOSE_PROJECT_NAME": "awoki",
+        "AWOKI_OPENCODE_WEB_ENABLED": "1",
+        "AWOKI_OPENCODE_WEB_PORT": "4096",
+        "AWOKI_OPENCODE_WEB_USERNAME": "opencode",
         "AWOKI_EMBEDDING_PROVIDER": "openai",
         "AWOKI_EMBEDDING_MODEL": "text-embeddings-inference",
         "AWOKI_EMBEDDING_DEPLOYMENT_ID": "",

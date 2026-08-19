@@ -92,6 +92,7 @@ minimal_env=(
 
 base_names=(
   AWOKI_ROOT AWOKI_MODE AWOKI_PROJECT_ID AWOKI_GLOBAL_ROOT AWOKI_GLOBAL_SKILLS_DIR
+  AWOKI_OPENCODE_WEB_ENABLED AWOKI_OPENCODE_WEB_PORT AWOKI_OPENCODE_WEB_USERNAME
   HARNESS_ROOT HARNESS_MODE HARNESS_PROJECT_ID HARNESS_GLOBAL_ROOT HARNESS_GLOBAL_SKILLS_DIR
 )
 qdrant_names=(
@@ -213,9 +214,11 @@ PY
       printf "runtime_env_snapshot_mtime=%s\n" "$(stat -c '%y' "$runtime_env_file" 2>/dev/null || printf unknown)"
       printf "credential_isolation=%s\n" "ambient-environment-minimization-not-sandbox"
       printf "runtime_user_can_read_snapshot=%s\n" "yes"
-      for name in AWOKI_MODE AWOKI_ROOT AWOKI_PROJECT_ID AWOKI_GLOBAL_ROOT AWOKI_GLOBAL_SKILLS_DIR; do
+      for name in AWOKI_MODE AWOKI_ROOT AWOKI_PROJECT_ID AWOKI_GLOBAL_ROOT AWOKI_GLOBAL_SKILLS_DIR \
+        AWOKI_OPENCODE_WEB_ENABLED AWOKI_OPENCODE_WEB_PORT AWOKI_OPENCODE_WEB_USERNAME; do
         print_value "$name"
       done
+      printf "AWOKI_OPENCODE_WEB_PASSWORD=<runtime-file-not-snapshot>\n"
       for name in AWOKI_QDRANT_URL AWOKI_QDRANT_HOST_URL AWOKI_QDRANT_CONTAINER_URL AWOKI_EMBEDDING_BASE_URL AWOKI_RERANK_URL AWOKI_BURP_HOST_URL AWOKI_BURP_CONTAINER_URL AWOKI_BURP_URL AWOKI_BURP_MCP_URL; do
         print_url "$name"
       done

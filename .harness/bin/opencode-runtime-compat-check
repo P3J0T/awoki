@@ -26,6 +26,12 @@ channel_state="$(jq -r '.channel_state // empty' "$manifest")"
 [[ -n "$recorded" && "$cli" == "$recorded" ]] || { echo "[awoki] OpenCode CLI differs from image manifest: cli=$cli recorded=$recorded" >&2; exit 2; }
 [[ "$plugin" == "$cli" ]] || { echo "[awoki] OpenCode plugin API mismatch: cli=$cli plugin=$plugin" >&2; exit 2; }
 [[ "$sdk" == "$cli" ]] || { echo "[awoki] OpenCode SDK API mismatch: cli=$cli sdk=$sdk" >&2; exit 2; }
+web_help="$(opencode web --help 2>&1)" || { echo "[awoki] resolved OpenCode CLI does not support web mode" >&2; exit 2; }
+attach_help="$(opencode attach --help 2>&1)" || { echo "[awoki] resolved OpenCode CLI does not support attach mode" >&2; exit 2; }
+grep -q -- '--hostname' <<<"$web_help" || { echo "[awoki] OpenCode web --hostname flag missing" >&2; exit 2; }
+grep -q -- '--port' <<<"$web_help" || { echo "[awoki] OpenCode web --port flag missing" >&2; exit 2; }
+grep -q -- '--password' <<<"$attach_help" || { echo "[awoki] OpenCode attach password support missing" >&2; exit 2; }
+grep -q -- '--username' <<<"$attach_help" || { echo "[awoki] OpenCode attach username support missing" >&2; exit 2; }
 if [[ "$mode" == safe ]]; then
   [[ "$channel_state" == operator_selected_safe ]] || { echo "[awoki] invalid safe OpenCode channel state: $channel_state" >&2; exit 2; }
   [[ -n "$requested" && "$cli" == "$requested" ]] || { echo "[awoki] safe OpenCode version mismatch: requested=$requested resolved=$cli" >&2; exit 2; }
@@ -35,9 +41,9 @@ fi
 
 if (( materialize )); then
   tmp="$(mktemp)"
-  jq --arg plugin "$plugin" --arg sdk "$sdk" '.resolved_plugin=$plugin | .resolved_sdk=$sdk' "$manifest" >"$tmp"
+  jq --arg plugin "$plugin" --arg sdk "$sdk" '.resolved_plugin=$plugin | .resolved_sdk=$sdk | .web_supported=true | .attach_supported=true' "$manifest" >"$tmp"
   install -m 0644 "$tmp" "$manifest"
   rm -f "$tmp"
 fi
 
-printf 'awoki_opencode_compat=ok mode=%s channel_state=%s cli=%s plugin=%s sdk=%s\n' "$mode" "$channel_state" "$cli" "$plugin" "$sdk"
+printf 'awoki_opencode_compat=ok mode=%s channel_state=%s cli=%s plugin=%s sdk=%s web=ok attach=ok\n' "$mode" "$channel_state" "$cli" "$plugin" "$sdk"

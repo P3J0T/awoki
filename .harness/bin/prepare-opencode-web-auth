@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+STATE="${AWOKI_OPENCODE_STATE_DIR:-$ROOT/.opencode-state}"
+AUTH_DIR="$STATE/web-auth"
+PASSWORD_FILE="$AUTH_DIR/password"
+
+python3 - "$STATE" "$AUTH_DIR" "$PASSWORD_FILE" <<'PY'
+import os
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+state_dir = Path(sys.argv[1])
+auth_dir = Path(sys.argv[2])
+password_file = Path(sys.argv[3])
+override = os.environ.get("AWOKI_OPENCODE_WEB_PASSWORD", "")
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"[awoki] {message}")
+
+
+def secure_owned_directory(path: Path, label: str) -> None:
+    if path.exists() or path.is_symlink():
+        st = path.lstat()
+        if stat.S_ISLNK(st.st_mode):
+            fail(f"{label} must not be a symlink: {path}")
+        if not stat.S_ISDIR(st.st_mode):
+            fail(f"{label} must be a directory: {path}")
+        if st.st_uid != os.getuid():
+            fail(f"{label} must be owned by the current host user: {path}")
+    else:
+        path.mkdir(parents=True, mode=0o700)
+    try:
+        os.chmod(path, 0o700)
+    except OSError as exc:
+        fail(f"could not secure {label} {path}: {exc}")
+
+
+secure_owned_directory(state_dir, "OpenCode state directory")
+secure_owned_directory(auth_dir, "OpenCode Web auth directory")
+
+if password_file.exists() or password_file.is_symlink():
+    st = password_file.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        fail(f"OpenCode Web password file must not be a symlink: {password_file}")
+    if not stat.S_ISREG(st.st_mode):
+        fail(f"OpenCode Web password path must be a regular file: {password_file}")
+    if st.st_uid != os.getuid():
+        fail(f"OpenCode Web password file must be owned by the current host user: {password_file}")
+    if st.st_nlink != 1:
+        fail(f"OpenCode Web password file must not be hard-linked: {password_file}")
+
+if override:
+    password = override
+elif password_file.exists():
+    password = password_file.read_text(encoding="utf-8")
+else:
+    password = secrets.token_urlsafe(32)
+
+if not password:
+    fail("OpenCode Web password must not be empty")
+if "\n" in password or "\r" in password:
+    fail("OpenCode Web password must be a single line")
+if len(password.encode("utf-8")) > 512:
+    fail("OpenCode Web password is unreasonably long")
+if override and len(password) < 12:
+    print("[awoki] warning: explicit OpenCode Web password is short; stock mode generates a strong random secret", file=sys.stderr)
+
+if override or not password_file.exists():
+    tmp = auth_dir / f".password.{os.getpid()}.{secrets.token_hex(4)}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(password)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, password_file)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+else:
+    os.chmod(password_file, 0o600)
+
+state_mode = stat.S_IMODE(state_dir.stat().st_mode)
+if state_mode != 0o700:
+    fail(f"OpenCode state directory mode must be 0700, got {state_mode:04o}")
+dir_mode = stat.S_IMODE(auth_dir.stat().st_mode)
+if dir_mode != 0o700:
+    fail(f"OpenCode Web auth directory mode must be 0700, got {dir_mode:04o}")
+mode = stat.S_IMODE(password_file.stat().st_mode)
+if mode != 0o600:
+    fail(f"OpenCode Web password file mode must be 0600, got {mode:04o}")
+
+print(f"[awoki] OpenCode Web auth ready: {password_file}")
+PY

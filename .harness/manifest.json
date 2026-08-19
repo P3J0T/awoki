@@ -11,12 +11,12 @@
       ".harness/notes.md": "portable",
       ".harness/state": "portable_except_layout_marker_lock_tracked_readme",
       ".opencode-state/cache|npm": "excluded_cache",
-      ".opencode-state/share|local-state|config": "explicit_sensitive_opt_in",
       ".ssh-container": "explicit_secret_opt_in",
       "data/qdrant": "full_only_stopped",
       "named_volumes": "excluded_recreated",
       "tmpfs|workspace/.lavish/state": "excluded_ephemeral",
-      "workspace": "portable_except_project_indexes_and_lavish_state"
+      "workspace": "portable_except_project_indexes_and_lavish_state",
+      ".opencode-state/share|local-state|config|web-auth": "explicit_sensitive_opt_in"
     },
     "checksum": "archive SHA-256 sidecar required for restore; integrity check only, not authentication or proof of origin",
     "cli": ".harness/bin/awoki-backup",
@@ -342,7 +342,7 @@
     "container_opencode_config": "opencode.jsonc",
     "container_qdrant_url": "http://qdrant:6333",
     "container_source": "baked_into_image_no_repo_root_bind_mount",
-    "container_writable_mounts": "workspace,harness state/index/artifacts/memory/notes,global,OpenCode share/local-state/config/cache/npm,Neovim state,SSH public/host keys",
+    "container_writable_mounts": "workspace,harness state/index/artifacts/memory/notes,global,OpenCode share/local-state/config/cache/npm,OpenCode Web auth read-only host state,Neovim state,SSH public/host keys",
     "default": "docker",
     "docker_network": "awoki-data (internal Qdrant) plus awoki-egress (OpenCode/MCP remote endpoint and host Burp access)",
     "docker_wrapper": ".harness/bin/mcp-docker",
@@ -361,7 +361,7 @@
     "mcp_runtime_environment_handoff": "the SSH entrypoint atomically writes allowlisted Compose values to root plus the op primary group, mode-0640 /run/awoki/runtime.env on tmpfs; mcp-auto validates the snapshot then relaunches mcp-local through the clean secret-bearing mcp profile rather than inheriting arbitrary SSH/OpenCode environment",
     "mcp_server": ".harness/server.py",
     "mcp_stderr_log": ".harness/state/mcp-local.stderr.log; stderr is mirrored to OpenCode and the durable log",
-    "opencode_config_note": "Run plain opencode from the repo root; do not use opencode --config.",
+    "opencode_config_note": "Use awoki-opencode in the SSH runtime so the TUI attaches to the shared Web backend when enabled; do not use opencode --config.",
     "opencode_ssh_compose": "docker-compose.opencode.yml",
     "opencode_ssh_service": "awoki-opencode-ssh",
     "repository_subprocess_environment": "passive Git reads and exhaustive ripgrep scans strip retrieval/provider credentials plus ambient Python/loader/SSH-agent/caller-selected Git SSH helper variables before launch; deterministic Go semantics uses a fixed clean environment; this is defense in depth, not same-user sandboxing",
@@ -372,7 +372,9 @@
     "runtime_env_security_limit": "profiles minimize accidental inherited variables but are not a same-user sandbox: stdio mcp-auto runs as op and therefore the op runtime user can deliberately read /run/awoki/runtime.env; do not execute hostile target/tool code in a credential-bearing analysis container",
     "tmux_config": "vendored gpakosz/.tmux main config under /opt/oh-my-tmux with Awoki local override at /home/op/.tmux.conf.local",
     "tmux_integrity": ".harness/vendor/oh-my-tmux/UPSTREAM.md records source, retrieval date, licenses, and SHA-256 hashes; no startup download",
-    "tmux_validation": ".harness/bin/tmux-check runs at image build and SSH startup; make opencode-runtime-check repeats tmux and MCP checks"
+    "tmux_validation": ".harness/bin/tmux-check runs at image build and SSH startup; make opencode-runtime-check repeats tmux and MCP checks",
+    "opencode_web": "enabled by default; one authenticated opencode web backend on container 0.0.0.0 with Docker publishing host 127.0.0.1:${AWOKI_OPENCODE_WEB_PORT:-4096}; mDNS disabled; awoki-opencode attaches SSH TUI to the same backend",
+    "opencode_web_auth": "host .opencode-state/web-auth/password is generated/preserved as 0600, mounted read-only as a directory, copied to /run/awoki/opencode-web-password as op:op 0600, omitted from Compose service env/runtime.env/argv, and passed only via OPENCODE_SERVER_PASSWORD to Web/attach processes"
   },
   "runtime_dependencies": {
     "check": "make dependencies-check",

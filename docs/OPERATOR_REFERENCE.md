@@ -16,7 +16,7 @@ Awoki is a Docker-first, continuity-first OpenCode harness for scoped project/gl
 - `/codebase` provides native structural repository search with symbol definitions, branch-aware exact/FTS/vector retrieval, call graphs, and bounded results. Exhaustive local text search is coverage-first: parser support, auth/security vocabulary, and security-named paths do not define the searchable universe; obvious raw-secret/config files are kept out of embeddings/structural indexes but may be accounted for locally with opaque previews.
 - Portable/full runtime backups provide checksum-verified migration with fail-closed restore.
 - Direct PortSwigger Burp MCP remains the live Burp control plane.
-- OpenCode runs inside the SSH container in the preferred deployment.
+- One authenticated OpenCode Web/server backend runs inside the SSH container by default; browser and SSH TUI share it through `opencode attach`.
 - Awoki source is baked into the image; only explicit runtime trust domains are writable.
 - Neovim is minimal; tmux uses a vendored, integrity-recorded gpakosz/Oh my tmux! configuration with an Awoki-owned local override.
 - There is no built-in credential database or credential MCP surface.
@@ -57,9 +57,11 @@ make opencode-runtime-check
 Connect:
 
 ```bash
+make opencode-web-password
+# Browser: http://127.0.0.1:${AWOKI_OPENCODE_WEB_PORT:-4096}
 ssh -i .ssh-container/id_ed25519 -p ${AWOKI_OPENCODE_SSH_PORT:-2222} op@127.0.0.1
 cd /awoki
-opencode
+awoki-opencode
 ```
 
 `./init-awoki.sh` creates the host SSH client key pair. `./run-opencode.sh`
@@ -72,7 +74,13 @@ container validates the injected public key and installs
 into the container, avoiding Docker Desktop's macOS single-file `/host_mnt` bind
 failure while keeping the private key host-only. Initialization also creates the
 bind-mounted `data/qdrant/collections/` parent required for reliable collection
-creation.
+creation. The same launcher secures host `.opencode-state/` and `.opencode-state/web-auth/`
+to `0700`, prepares `.opencode-state/web-auth/password` as a single-link host-only
+`0600` secret, mounts its directory read-only, and the entrypoint copies it to
+`/run/awoki/opencode-web-password` as `op:op 0600`. The password is not in
+the Compose service environment or `/run/awoki/runtime.env`; OpenCode receives
+it only through the Web/attach process environment because its Basic-Auth server
+requires the original password rather than a hash.
 
 ### First managed project: `test2` with Oathkeeper
 

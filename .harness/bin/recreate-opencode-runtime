@@ -91,4 +91,10 @@ make opencode-runtime-check
 port="${AWOKI_OPENCODE_SSH_PORT:-2222}"
 echo "[awoki] OpenCode runtime recreated and checked (install_mode=${OPENCODE_INSTALL_MODE}${OPENCODE_SAFE_VERSION:+ safe_version=${OPENCODE_SAFE_VERSION}})."
 echo "[awoki] SSH: ssh -i .ssh-container/id_ed25519 -p ${port} op@127.0.0.1"
-echo "[awoki] Then: cd /awoki && opencode"
+case "${AWOKI_OPENCODE_WEB_ENABLED:-1}" in
+  1|true|TRUE|yes|YES|on|ON)
+    echo "[awoki] Web: http://127.0.0.1:${AWOKI_OPENCODE_WEB_PORT:-4096}"
+    echo "[awoki] Web password: make opencode-web-password"
+    ;;
+esac
+echo "[awoki] Then: cd /awoki && awoki-opencode"

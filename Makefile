@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: doctor continuity-doctor dependencies-check dev-preflight init layout require-init maintenance-check validate validate-runtime code-search-eval code-search-eval-runtime install install-opencode-ssh opencode-ssh opencode-recreate docker-build docker-up docker-down docker-smoke opencode-ssh-build opencode-ssh-up opencode-ssh-down opencode-ssh-shell opencode-runtime-check runtime-config embedding-benchmark reranker-benchmark mcp-local mcp-docker mcp-auto index index-local index-vector index-vector-local burp-status burp-tools burp-validate backup-portable backup-full backup-verify backup-inspect restore test clean package
+.PHONY: doctor continuity-doctor dependencies-check dev-preflight init layout require-init maintenance-check validate validate-runtime code-search-eval code-search-eval-runtime install install-opencode-ssh opencode-ssh opencode-recreate docker-build docker-up docker-down docker-smoke opencode-ssh-build opencode-ssh-up opencode-ssh-down opencode-ssh-shell opencode-web-password opencode-runtime-check runtime-config embedding-benchmark reranker-benchmark mcp-local mcp-docker mcp-auto index index-local index-vector index-vector-local burp-status burp-tools burp-validate backup-portable backup-full backup-verify backup-inspect restore test clean package
 
 BACKUP_DIR ?= ../awoki-backups
 BACKUP ?=
@@ -69,6 +69,9 @@ validate:
 		.harness/bin/init-global \
 		.harness/bin/init-layout \
 		.harness/bin/prepare-opencode-ssh-keys \
+		.harness/bin/prepare-opencode-web-auth \
+		.harness/bin/opencode-web-password \
+		.harness/bin/awoki-opencode \
 		.harness/bin/prepare-qdrant-storage \
 		init-awoki.sh \
 		.harness/bin/wait-qdrant \
@@ -102,8 +105,10 @@ install: require-init doctor docker-build docker-up docker-smoke
 install-opencode-ssh: require-init doctor docker-build opencode-ssh-build opencode-ssh-up
 	@echo "Awoki OpenCode-over-SSH install completed."
 	@echo "SSH with: ssh -i .ssh-container/id_ed25519 -p $${AWOKI_OPENCODE_SSH_PORT:-2222} op@127.0.0.1"
+	@echo "OpenCode Web (default): http://127.0.0.1:$${AWOKI_OPENCODE_WEB_PORT:-4096}"
+	@echo "Show Web password explicitly with: make opencode-web-password"
 	@echo "Recommended inside SSH: cd /awoki && tmux new -A -s awoki"
-	@echo "Then run OpenCode inside tmux: opencode"
+	@echo "Then run: awoki-opencode"
 
 opencode-ssh: require-init
 	./run-opencode.sh
@@ -143,11 +148,18 @@ opencode-ssh-down:
 opencode-ssh-shell:
 	ssh -i .ssh-container/id_ed25519 -p $${AWOKI_OPENCODE_SSH_PORT:-2222} op@127.0.0.1
 
+opencode-web-password:
+	@.harness/bin/opencode-web-password
+
 opencode-runtime-check:
 	@docker compose -f docker-compose.opencode.yml exec -T -u root awoki-opencode-ssh \
 		/awoki/.harness/bin/awoki-runtime-snapshot >/dev/null
 	docker compose -f docker-compose.opencode.yml exec -T -u op awoki-opencode-ssh \
 		/awoki/.harness/bin/opencode-runtime-compat-check
+	@docker compose -f docker-compose.opencode.yml exec -T -u op awoki-opencode-ssh bash -lc '\
+		case "$${AWOKI_OPENCODE_WEB_ENABLED:-1}" in 1|true|TRUE|yes|YES|on|ON) \
+		  /awoki/.harness/bin/opencode-web-health --url "http://127.0.0.1:$${AWOKI_OPENCODE_WEB_PORT:-4096}" --username "$${AWOKI_OPENCODE_WEB_USERNAME:-opencode}" --password-file /run/awoki/opencode-web-password ;; \
+		esac'
 	docker compose -f docker-compose.opencode.yml exec -T -u op awoki-opencode-ssh \
 		/awoki/.harness/bin/awoki-runtime-env --profile qdrant -- bash -lc 'set -euo pipefail; \
 			test "$${AWOKI_ROOT:-}" = /awoki; \

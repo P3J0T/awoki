@@ -130,7 +130,7 @@ make backup-full \
   BACKUP_INCLUDE_SECRETS=1
 ```
 
-`BACKUP_INCLUDE_OPENCODE_STATE=1` captures `.opencode-state/share`, `local-state`, and `config`, but still excludes `cache` and `npm`. OpenCode state may contain provider credentials, sessions, and conversation data, so the archive is marked sensitive.
+`BACKUP_INCLUDE_OPENCODE_STATE=1` captures `.opencode-state/share`, `local-state`, `config`, and the generated `.opencode-state/web-auth/password`, but still excludes `cache` and `npm`. OpenCode state may contain provider credentials, sessions, conversation data, and the OpenCode Web Basic-Auth secret, so the archive is marked sensitive.
 
 `BACKUP_INCLUDE_SECRETS=1` captures `.env` and `.ssh-container/`. Transfer such archives only through an encrypted channel and store them as secrets.
 
@@ -148,7 +148,7 @@ Every host bind mount in both Compose files is classified and validated by `.har
 | `.harness/index/` | no | yes | Derived local FTS/index state |
 | `.awoki-global/` and configured global roots/skills | yes | yes | Portable excludes only exact generated global FTS/index files |
 | `data/qdrant/` | no | yes | Raw local bind-mounted Qdrant storage; requires quiescence and compatibility checks |
-| `.opencode-state/share`, `local-state`, `config` | opt-in | opt-in | `BACKUP_INCLUDE_OPENCODE_STATE=1`; may contain credentials/conversations |
+| `.opencode-state/share`, `local-state`, `config`, `web-auth` | opt-in | opt-in | `BACKUP_INCLUDE_OPENCODE_STATE=1`; may contain credentials/conversations/Web password |
 | `.opencode-state/cache`, `.opencode-state/npm` | no | no | Rebuildable caches |
 | `.ssh-container/` | opt-in | opt-in | `BACKUP_INCLUDE_SECRETS=1` |
 | Neovim and SSH-host-key named volumes | no | no | Recreated on the destination |

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+runtime_env_file="${AWOKI_RUNTIME_ENV_FILE:-/run/awoki/runtime.env}"
+password_file="${AWOKI_OPENCODE_WEB_RUNTIME_PASSWORD_FILE:-/run/awoki/opencode-web-password}"
+
+if [[ -r "$runtime_env_file" && -f "$runtime_env_file" && ! -L "$runtime_env_file" ]]; then
+  # Trusted runtime wrapper: import only the entrypoint-generated allowlisted snapshot.
+  # shellcheck disable=SC1090
+  source "$runtime_env_file"
+fi
+
+case "${AWOKI_OPENCODE_WEB_ENABLED:-1}" in
+  1|true|TRUE|yes|YES|on|ON)
+    [[ -r "$password_file" && -f "$password_file" && ! -L "$password_file" ]] || {
+      echo "[awoki] OpenCode Web is enabled but the runtime password file is unavailable" >&2
+      exit 2
+    }
+    export OPENCODE_SERVER_USERNAME="${AWOKI_OPENCODE_WEB_USERNAME:-opencode}"
+    export OPENCODE_SERVER_PASSWORD="$(cat "$password_file")"
+    exec opencode attach "http://127.0.0.1:${AWOKI_OPENCODE_WEB_PORT:-4096}" --dir /awoki "$@"
+    ;;
+  0|false|FALSE|no|NO|off|OFF)
+    exec opencode "$@"
+    ;;
+  *)
+    echo "[awoki] invalid AWOKI_OPENCODE_WEB_ENABLED=${AWOKI_OPENCODE_WEB_ENABLED}" >&2
+    exit 2
+    ;;
+esac

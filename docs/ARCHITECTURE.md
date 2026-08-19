@@ -20,6 +20,7 @@
 
 ```text
 macOS host
+  ├─ browser to authenticated OpenCode Web at 127.0.0.1:4096
   ├─ Burp MCP at 127.0.0.1:9876
   ├─ SSH client to 127.0.0.1:2222
   └─ operator-configured route to an optional remote retrieval host
@@ -32,14 +33,15 @@ Docker network: awoki
   ├─ qdrant
   │    http://qdrant:6333
   └─ awoki-opencode-ssh
-       OpenCode TUI
+       one OpenCode Web/server backend
+       optional SSH TUI attached to that backend
        Awoki MCP child process
        immutable Awoki source baked into image
        explicit writable runtime mounts
        Burp via host.docker.internal:9876
 ```
 
-No Docker socket, host PID namespace, host network, or privileged mode is used.
+No Docker socket, host PID namespace, host network, or privileged mode is used. OpenCode Web is published only through a host-loopback Docker mapping; mDNS is disabled. The stock Basic-Auth secret is generated into ignored host state, mounted read-only as a directory, copied to container tmpfs with mode 0600, and never added to the general runtime environment snapshot.
 
 ### Component and data-flow view
 
