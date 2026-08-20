@@ -149,20 +149,62 @@ class QdrantStoragePreflightTests(unittest.TestCase):
             set -euo pipefail
             echo "$*" >> "$FAKE_DOCKER_LOG"
             if [[ "${1:-}" == "compose" && "${2:-}" == "version" ]]; then exit 0; fi
+            qdrant_full=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+            opencode_full=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
             if [[ "${1:-}" == "compose" && "$*" == *" ps -a -q qdrant"* ]]; then
-              [[ "${FAKE_COMPOSE_VISIBLE:-1}" == "1" ]] && echo fake-qdrant
+              if [[ "${FAKE_COMPOSE_VISIBLE:-1}" == "1" ]]; then
+                if [[ "${FAKE_REVERSED_ID_FORMS:-0}" == "1" ]]; then
+                  echo "${qdrant_full:0:12}"
+                elif [[ "${FAKE_MIXED_ID_FORMS:-0}" == "1" ]]; then
+                  echo "$qdrant_full"
+                else
+                  echo fake-qdrant
+                fi
+              fi
               exit 0
             fi
             if [[ "${1:-}" == "compose" && "$*" == *" ps -a -q awoki-opencode-ssh"* ]]; then
-              [[ "${FAKE_COMPOSE_VISIBLE:-1}" == "1" ]] && echo fake-opencode
+              if [[ "${FAKE_COMPOSE_VISIBLE:-1}" == "1" ]]; then
+                if [[ "${FAKE_REVERSED_ID_FORMS:-0}" == "1" ]]; then
+                  echo "${opencode_full:0:12}"
+                elif [[ "${FAKE_MIXED_ID_FORMS:-0}" == "1" ]]; then
+                  echo "$opencode_full"
+                else
+                  echo fake-opencode
+                fi
+              fi
               exit 0
             fi
-            if [[ "${1:-}" == "ps" && "$*" == *"label=com.docker.compose.service=qdrant"* ]]; then echo fake-qdrant; exit 0; fi
-            if [[ "${1:-}" == "ps" && "$*" == *"label=com.docker.compose.service=awoki-opencode-ssh"* ]]; then echo fake-opencode; exit 0; fi
+            if [[ "${1:-}" == "ps" && "$*" == *"label=com.docker.compose.service=qdrant"* ]]; then
+              if [[ "${FAKE_REVERSED_ID_FORMS:-0}" == "1" ]]; then
+                echo "$qdrant_full"
+              elif [[ "${FAKE_MIXED_ID_FORMS:-0}" == "1" ]]; then
+                echo "${qdrant_full:0:12}"
+              else
+                echo fake-qdrant
+              fi
+              exit 0
+            fi
+            if [[ "${1:-}" == "ps" && "$*" == *"label=com.docker.compose.service=awoki-opencode-ssh"* ]]; then
+              if [[ "${FAKE_REVERSED_ID_FORMS:-0}" == "1" ]]; then
+                echo "$opencode_full"
+              elif [[ "${FAKE_MIXED_ID_FORMS:-0}" == "1" ]]; then
+                echo "${opencode_full:0:12}"
+              else
+                echo fake-opencode
+              fi
+              exit 0
+            fi
             if [[ "${1:-}" == "inspect" ]]; then
               template="${3:-}"
               cid="${4:-}"
-              if [[ "$template" == *"project.working_dir"* ]]; then echo "$FAKE_RUNTIME_WORKDIR"
+              if [[ "$template" == *".Id"* ]]; then
+                case "$cid" in
+                  "$qdrant_full"|"${qdrant_full:0:12}") echo "$qdrant_full" ;;
+                  "$opencode_full"|"${opencode_full:0:12}") echo "$opencode_full" ;;
+                  *) echo "$cid" ;;
+                esac
+              elif [[ "$template" == *"project.working_dir"* ]]; then echo "$FAKE_RUNTIME_WORKDIR"
               elif [[ "$template" == *"io.awoki.runtime_instance_id"* ]]; then echo "$FAKE_RUNTIME_INSTANCE"
               elif [[ "$template" == *".Name"* ]]; then echo "/$cid"
               fi
@@ -200,6 +242,41 @@ class QdrantStoragePreflightTests(unittest.TestCase):
             self.assertNotIn('rm -v', docker_log)
             self.assertNotIn('down --remove-orphans', docker_log)
 
+
+    def test_reconcile_deduplicates_short_and_full_container_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env, compose, log = self._fake_reconcile_env(root, working_dir=str(root), instance_id='a' * 32)
+            env['FAKE_MIXED_ID_FORMS'] = '1'
+            result = subprocess.run([str(RECONCILE_SCRIPT), str(compose)], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            docker_log = log.read_text(encoding='utf-8')
+            qdrant_full = 'a' * 64
+            opencode_full = 'b' * 64
+            self.assertEqual(docker_log.count(f'rm -f {qdrant_full}'), 1)
+            self.assertEqual(docker_log.count(f'rm -f {opencode_full}'), 1)
+            self.assertEqual(result.stderr.count('[awoki]   qdrant:'), 1)
+            self.assertEqual(result.stderr.count('[awoki]   awoki-opencode-ssh:'), 1)
+
+    def test_reconcile_canonicalizes_compose_membership_when_compose_uses_short_id(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            other = str(root) + '-other'
+            env, compose, log = self._fake_reconcile_env(
+                root,
+                working_dir=other,
+                instance_id='a' * 32,
+            )
+            env['FAKE_REVERSED_ID_FORMS'] = '1'
+            result = subprocess.run(
+                [str(RECONCILE_SCRIPT), str(compose)],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 4, result.stderr)
+            self.assertIn('Compose project conflict', result.stderr)
+            self.assertNotIn('rm -f', log.read_text(encoding='utf-8'))
 
     def test_reconcile_finds_same_path_stale_runtime_even_when_compose_ps_cannot_see_it(self):
         with tempfile.TemporaryDirectory() as td:
