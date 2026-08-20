@@ -64,11 +64,26 @@ seen_ids=""
 # Awoki service containers globally too, then scope them by the recorded
 # working-directory identity before making any cleanup decision.
 for service in qdrant awoki-opencode-ssh; do
-  compose_ids="$(docker compose -f "$COMPOSE_FILE" ps -a -q "$service" 2>/dev/null || true)"
-  labelled_ids="$(docker ps -a --filter "label=com.docker.compose.service=$service" -q 2>/dev/null || true)"
-  candidate_ids="$compose_ids $labelled_ids"
+  compose_ids_raw="$(docker compose -f "$COMPOSE_FILE" ps -a -q "$service" 2>/dev/null || true)"
+  compose_ids=""
+  for compose_candidate_id in $compose_ids_raw; do
+    compose_cid="$(docker inspect -f '{{ .Id }}' "$compose_candidate_id" 2>/dev/null || true)"
+    case "$compose_cid" in
+      '<no value>'|'<nil>'|'') compose_cid="$compose_candidate_id" ;;
+    esac
+    compose_ids="$compose_ids $compose_cid"
+  done
 
-  for cid in $candidate_ids; do
+  labelled_ids="$(docker ps -a --filter "label=com.docker.compose.service=$service" -q 2>/dev/null || true)"
+  candidate_ids="$compose_ids_raw $labelled_ids"
+
+  for candidate_id in $candidate_ids; do
+    # Compose and `docker ps -q` may spell the same container differently
+    # (for example a 64-character ID versus its 12-character prefix). Resolve
+    # every candidate to Docker's canonical full ID before deduplication so a
+    # stale container is reported and removed exactly once.
+    cid="$(docker inspect -f '{{ .Id }}' "$candidate_id" 2>/dev/null || true)"
+    case "$cid" in '<no value>'|'<nil>'|'') cid="$candidate_id" ;; esac
     case " $seen_ids " in *" $cid "*) continue ;; esac
     seen_ids="$seen_ids $cid"
 
