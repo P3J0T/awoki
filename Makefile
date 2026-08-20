@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: doctor continuity-doctor dependencies-check dev-preflight init layout require-init maintenance-check validate validate-runtime code-search-eval code-search-eval-runtime install install-opencode-ssh opencode-ssh opencode-recreate docker-build docker-up docker-down docker-smoke opencode-ssh-build opencode-ssh-up opencode-ssh-down opencode-ssh-shell opencode-web-password opencode-runtime-check runtime-config embedding-benchmark reranker-benchmark mcp-local mcp-docker mcp-auto index index-local index-vector index-vector-local burp-status burp-tools burp-validate backup-portable backup-full backup-verify backup-inspect restore test clean package
+.PHONY: doctor continuity-doctor dependencies-check dev-preflight install-interactive init layout require-init maintenance-check validate validate-runtime code-search-eval code-search-eval-runtime install install-opencode-ssh opencode-ssh opencode-recreate docker-build docker-up docker-down docker-smoke opencode-ssh-build opencode-ssh-up opencode-ssh-down opencode-ssh-shell opencode-ssh-client-check opencode-web-password opencode-user-config-check opencode-config-reload opencode-auth opencode-runtime-check runtime-config embedding-benchmark reranker-benchmark mcp-local mcp-docker mcp-auto index index-local index-vector index-vector-local burp-status burp-tools burp-validate backup-portable backup-full backup-verify backup-inspect restore test clean package
 
 BACKUP_DIR ?= ../awoki-backups
 BACKUP ?=
@@ -31,6 +31,9 @@ dependencies-check:
 
 dev-preflight:
 	.harness/bin/awoki-dev-preflight
+
+install-interactive:
+	./install-awoki.sh
 
 init:
 	./init-awoki.sh
@@ -69,9 +72,15 @@ validate:
 		.harness/bin/init-global \
 		.harness/bin/init-layout \
 		.harness/bin/prepare-opencode-ssh-keys \
+		.harness/bin/verify-opencode-ssh-client \
 		.harness/bin/prepare-opencode-web-auth \
 		.harness/bin/opencode-web-password \
+		.harness/bin/opencode-user-config-check \
 		.harness/bin/awoki-opencode \
+		.harness/bin/reconcile-opencode-runtime \
+		.harness/bin/reconcile-opencode-port-owner \
+		install-awoki.sh \
+		bootstrap-awoki.sh \
 		.harness/bin/prepare-qdrant-storage \
 		init-awoki.sh \
 		.harness/bin/wait-qdrant \
@@ -104,7 +113,7 @@ install: require-init doctor docker-build docker-up docker-smoke
 
 install-opencode-ssh: require-init doctor docker-build opencode-ssh-build opencode-ssh-up
 	@echo "Awoki OpenCode-over-SSH install completed."
-	@echo "SSH with: ssh -i .ssh-container/id_ed25519 -p $${AWOKI_OPENCODE_SSH_PORT:-2222} op@127.0.0.1"
+	@printf 'SSH with: ssh -i "%s/.ssh-container/id_ed25519" -o IdentitiesOnly=yes -o UserKnownHostsFile="%s/.ssh-container/known_hosts" -o StrictHostKeyChecking=accept-new -p %s op@127.0.0.1\n' "$(CURDIR)" "$(CURDIR)" "$${AWOKI_OPENCODE_SSH_PORT:-2222}"
 	@echo "OpenCode Web (default): http://127.0.0.1:$${AWOKI_OPENCODE_WEB_PORT:-4096}"
 	@echo "Show Web password explicitly with: make opencode-web-password"
 	@echo "Recommended inside SSH: cd /awoki && tmux new -A -s awoki"
@@ -146,10 +155,35 @@ opencode-ssh-down:
 	docker compose -f docker-compose.opencode.yml down
 
 opencode-ssh-shell:
-	ssh -i .ssh-container/id_ed25519 -p $${AWOKI_OPENCODE_SSH_PORT:-2222} op@127.0.0.1
+	ssh -i "$(CURDIR)/.ssh-container/id_ed25519" -o IdentitiesOnly=yes -o UserKnownHostsFile="$(CURDIR)/.ssh-container/known_hosts" -o StrictHostKeyChecking=accept-new -p $${AWOKI_OPENCODE_SSH_PORT:-2222} op@127.0.0.1
+
+opencode-ssh-client-check:
+	@.harness/bin/verify-opencode-ssh-client
 
 opencode-web-password:
 	@.harness/bin/opencode-web-password
+
+opencode-user-config-check:
+	@.harness/bin/opencode-user-config-check
+
+opencode-config-reload: opencode-user-config-check
+	@if ! docker compose -f docker-compose.opencode.yml ps -q awoki-opencode-ssh 2>/dev/null | grep -q .; then \
+		echo "[awoki] OpenCode user config is valid; runtime is not running, so the next start will load it."; \
+	else \
+		echo "[awoki] restarting OpenCode SSH/Web service to reload user provider/model configuration..."; \
+		docker compose -f docker-compose.opencode.yml restart awoki-opencode-ssh; \
+		.harness/bin/run-opencode-ssh; \
+		docker compose -f docker-compose.opencode.yml exec -T -u op \
+			-e HOME=/home/op -e OPENCODE_CONFIG_DIR=/awoki/.opencode \
+			awoki-opencode-ssh opencode debug config >/dev/null; \
+		$(MAKE) opencode-runtime-check; \
+	fi
+
+opencode-auth:
+	docker compose -f docker-compose.opencode.yml exec -u op \
+		-e HOME=/home/op -e OPENCODE_CONFIG_DIR=/awoki/.opencode \
+		awoki-opencode-ssh opencode auth login
+	@$(MAKE) opencode-config-reload
 
 opencode-runtime-check:
 	@docker compose -f docker-compose.opencode.yml exec -T -u root awoki-opencode-ssh \
@@ -167,7 +201,7 @@ opencode-runtime-check:
 			test "$${AWOKI_QDRANT_URL:-}" = http://qdrant:6333; \
 			HOME=/home/op /awoki/.harness/bin/mcp-preflight; \
 			HOME=/home/op /awoki/.harness/bin/code-parser-check >/dev/null; \
-			HOME=/home/op TERM=xterm-256color /awoki/.harness/bin/tmux-check'
+			HOME=/home/op TERM=xterm-256color /awoki/.harness/bin/tmux-check >/dev/null'
 
 runtime-config:
 	@if [ -r /run/awoki/runtime.env ] && [ -x .harness/bin/awoki-runtime-env ]; then \

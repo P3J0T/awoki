@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONFIG="${1:-$ROOT/.opencode-state/config/opencode.jsonc}"
+
+if [[ ! -e "$CONFIG" ]]; then
+  echo "awoki_opencode_user_config=absent path=$CONFIG"
+  exit 0
+fi
+[[ -f "$CONFIG" ]] || {
+  echo "[awoki] OpenCode user config exists but is not a regular file: $CONFIG" >&2
+  exit 2
+}
+[[ ! -L "$CONFIG" ]] || {
+  echo "[awoki] OpenCode user config must not be a symlink: $CONFIG" >&2
+  exit 2
+}
+
+python3 - "$CONFIG" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+out = []
+i = 0
+in_str = False
+esc = False
+while i < len(text):
+    c = text[i]
+    n = text[i + 1] if i + 1 < len(text) else ""
+    if in_str:
+        out.append(c)
+        if esc:
+            esc = False
+        elif c == "\\":
+            esc = True
+        elif c == '"':
+            in_str = False
+        i += 1
+        continue
+    if c == '"':
+        in_str = True
+        out.append(c)
+        i += 1
+        continue
+    if c == "/" and n == "/":
+        i += 2
+        while i < len(text) and text[i] not in "\r\n":
+            i += 1
+        continue
+    if c == "/" and n == "*":
+        i += 2
+        while i + 1 < len(text) and not (text[i] == "*" and text[i + 1] == "/"):
+            i += 1
+        if i + 1 >= len(text):
+            raise SystemExit(f"[awoki] unterminated JSONC block comment: {path}")
+        i += 2
+        continue
+    out.append(c)
+    i += 1
+
+stripped = "".join(out)
+# JSONC accepts trailing commas. Remove only commas outside strings whose next
+# non-whitespace token closes an object or array.
+clean = []
+i = 0
+in_str = False
+esc = False
+while i < len(stripped):
+    c = stripped[i]
+    if in_str:
+        clean.append(c)
+        if esc:
+            esc = False
+        elif c == "\\":
+            esc = True
+        elif c == '"':
+            in_str = False
+        i += 1
+        continue
+    if c == '"':
+        in_str = True
+        clean.append(c)
+        i += 1
+        continue
+    if c == ",":
+        j = i + 1
+        while j < len(stripped) and stripped[j].isspace():
+            j += 1
+        if j < len(stripped) and stripped[j] in "}]":
+            i += 1
+            continue
+    clean.append(c)
+    i += 1
+
+try:
+    value = json.loads("".join(clean))
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"[awoki] invalid OpenCode user JSONC {path}: {exc}")
+if not isinstance(value, dict):
+    raise SystemExit(f"[awoki] OpenCode user config must contain a JSON object: {path}")
+print(f"awoki_opencode_user_config=ok path={path}")
+PY

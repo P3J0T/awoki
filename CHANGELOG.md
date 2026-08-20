@@ -8,6 +8,14 @@
 - Adds `awoki-opencode`, which attaches the SSH TUI to the same Web backend so browser/TUI share OpenCode sessions and Awoki session identity.
 - Adds authenticated `/global/health` readiness, Web/attach CLI compatibility checks, headless-container browser-launch handling, port conflict checks, backup classification, runtime regressions, and operator documentation.
 - Tracks future platform secure-storage and authenticated TLS reverse-proxy work separately; OpenCode Basic Auth currently requires the plaintext password at process launch and does not accept a hash.
+- Adds per-checkout runtime-instance identity to the ignored layout marker and Compose service labels so Docker Desktop stale same-path bind mounts can be distinguished from the current checkout.
+- OpenCode startup now reports and automatically removes only unambiguously stale same-path Compose containers/networks without `-v`, preserving named volumes and host Qdrant data; different-checkout project collisions fail closed with an explicit diagnostic.
+- Adds `install-awoki.sh` / `make install-interactive`: a Bash-3.2-compatible guided first-run wizard that safely creates/refreshes `.env`, prompts for SSH/Web/retrieval settings, asks before stale-runtime cleanup, can choose a new Compose project name for a different-checkout collision, and optionally runs OpenCode provider/MCP setup plus runtime verification.
+- Adds `bootstrap-awoki.sh` for release/source ZIP replacement: move an existing checkout aside or choose another target, optionally download an HTTPS ZIP, extract without silent deletion, create a clearly labeled local baseline HEAD when a GitHub source ZIP has no history, then enter the guided installer; existing Docker containers are left for runtime-instance reconciliation.
+- Changes the Awoki tmux default to mouse-off with `set-clipboard external` for explicit keyboard copy-mode plus OSC 52 host clipboard forwarding; mouse remains an opt-in `<prefix> m` toggle for VS Code Remote-SSH/macOS terminals.
+- Hardens OpenCode SSH installation completion: startup now requires a valid matching host keypair, requires the running container `authorized_keys` to match that public key, and requires a real BatchMode public-key login before startup or the guided installer can report success; `make opencode-ssh-client-check` repeats the same contract.
+- Prints absolute host SSH key paths in post-install commands so copied connection commands do not depend on the current working directory.
+- Uses checkout-local `.ssh-container/known_hosts` in verifier and printed/manual SSH commands, so installing/replacing Awoki never requires clearing the operator's global `~/.ssh/known_hosts`.
 
 Public releases use semantic versioning. The historical `R9.1.6.x` entries below are the internal pre-v0.1.0 development/stabilization line.
 

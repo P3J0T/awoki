@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+COMPOSE_FILE="${1:-docker-compose.opencode.yml}"
+POLICY="${AWOKI_RUNTIME_CONFLICT_POLICY:-auto}"
+case "$POLICY" in auto|ask|fail) ;; *) echo "[awoki] invalid AWOKI_RUNTIME_CONFLICT_POLICY=$POLICY (expected auto|ask|fail)" >&2; exit 3 ;; esac
+case "$COMPOSE_FILE" in
+  /*) ;;
+  *) COMPOSE_FILE="$ROOT/$COMPOSE_FILE" ;;
+esac
+
+EXPECTED_INSTANCE="${AWOKI_RUNTIME_INSTANCE_ID:-}"
+[[ "$EXPECTED_INSTANCE" =~ ^[0-9a-f]{32}$ ]] || {
+  echo "[awoki] runtime reconciliation requires a valid AWOKI_RUNTIME_INSTANCE_ID" >&2
+  exit 3
+}
+
+command -v docker >/dev/null 2>&1 || {
+  echo "[awoki] docker is unavailable" >&2
+  exit 3
+}
+docker compose version >/dev/null 2>&1 || {
+  echo "[awoki] docker compose is unavailable" >&2
+  exit 3
+}
+[[ -f "$COMPOSE_FILE" ]] || {
+  echo "[awoki] compose file does not exist: $COMPOSE_FILE" >&2
+  exit 3
+}
+
+canonical_path() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+EXPECTED_ROOT="$(canonical_path "$ROOT")"
+
+normalize_owner_root() {
+  local raw="$1" normal stripped
+  case "$raw" in '<no value>'|'<nil>'|'') printf '%s' ''; return 0 ;; esac
+  normal="$(canonical_path "$raw")"
+  if [[ "$raw" == /host_mnt/* ]]; then
+    stripped="${raw#/host_mnt}"
+    if [[ "$(canonical_path "$stripped")" == "$EXPECTED_ROOT" ]]; then
+      printf '%s' "$EXPECTED_ROOT"
+      return 0
+    fi
+  fi
+  printf '%s' "$normal"
+}
+stale=0
+stale_lines=()
+stale_ids=""
+seen_ids=""
+
+# `docker compose ps` is intentionally not the only discovery source here.
+# Docker Desktop can keep a container from a checkout that was deleted and
+# recreated at the same pathname while the new Compose invocation no longer
+# considers that container part of its active model. Discover Compose-labelled
+# Awoki service containers globally too, then scope them by the recorded
+# working-directory identity before making any cleanup decision.
+for service in qdrant awoki-opencode-ssh; do
+  compose_ids="$(docker compose -f "$COMPOSE_FILE" ps -a -q "$service" 2>/dev/null || true)"
+  labelled_ids="$(docker ps -a --filter "label=com.docker.compose.service=$service" -q 2>/dev/null || true)"
+  candidate_ids="$compose_ids $labelled_ids"
+
+  for cid in $candidate_ids; do
+    case " $seen_ids " in *" $cid "*) continue ;; esac
+    seen_ids="$seen_ids $cid"
+
+    actual_root="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$cid" 2>/dev/null || true)"
+    actual_instance="$(docker inspect -f '{{ index .Config.Labels "io.awoki.runtime_instance_id" }}' "$cid" 2>/dev/null || true)"
+    actual_name="$(docker inspect -f '{{ .Name }}' "$cid" 2>/dev/null | sed 's#^/##' || true)"
+    case "$actual_root" in '<no value>'|'<nil>') actual_root="" ;; esac
+    case "$actual_instance" in '<no value>'|'<nil>') actual_instance="" ;; esac
+
+    # Globally discovered containers from other checkouts are unrelated and are
+    # ignored. A container returned by the current Compose project, however,
+    # must have a trustworthy checkout identity or we fail closed.
+    from_current_compose=0
+    case " $compose_ids " in *" $cid "*) from_current_compose=1 ;; esac
+
+    if [[ -z "$actual_root" ]]; then
+      if (( from_current_compose )); then
+        echo "[awoki] existing Compose container has no working-directory identity; refusing automatic removal." >&2
+        echo "[awoki] service: $service container: ${actual_name:-$cid}" >&2
+        echo "[awoki] Inspect it manually, then remove/recreate it if it belongs to an obsolete Awoki runtime." >&2
+        exit 3
+      fi
+      continue
+    fi
+
+    actual_root="$(normalize_owner_root "$actual_root")"
+    if [[ "$actual_root" != "$EXPECTED_ROOT" ]]; then
+      if (( from_current_compose )); then
+        cat >&2 <<EOF
+[awoki] Compose project conflict: an existing Awoki container belongs to a different checkout.
+[awoki] service: $service
+[awoki] container: ${actual_name:-$cid}
+[awoki] current checkout: $EXPECTED_ROOT
+[awoki] container checkout: $actual_root
+[awoki] Refusing automatic cleanup because this may be a separate live Awoki installation.
+[awoki] Use a distinct AWOKI_COMPOSE_PROJECT_NAME, or stop the other checkout explicitly.
+EOF
+        # Distinct status lets the interactive installer offer a new Compose
+        # project name without guessing or deleting the other checkout.
+        exit 4
+      fi
+      continue
+    fi
+
+    if [[ "$actual_instance" != "$EXPECTED_INSTANCE" ]]; then
+      stale=1
+      [[ -n "$actual_instance" ]] || actual_instance="legacy/missing"
+      stale_lines+=("[awoki]   $service: ${actual_name:-$cid} runtime_instance=$actual_instance")
+      stale_ids="$stale_ids $cid"
+    fi
+  done
+done
+
+if (( ! stale )); then
+  exit 0
+fi
+
+cat >&2 <<EOF
+[awoki] Detected stale Awoki containers from a replaced/reinitialized checkout at the same host path.
+[awoki] current checkout: $EXPECTED_ROOT
+[awoki] current runtime_instance: $EXPECTED_INSTANCE
+EOF
+printf '%s\n' "${stale_lines[@]}" >&2
+cat >&2 <<EOF
+[awoki] Docker Desktop can retain bind mounts to the deleted directory object even after a new checkout is created at the same pathname.
+[awoki] Safe cleanup removes only the stale Awoki service containers and recreates them against the current checkout.
+[awoki] Persistent named volumes and host data (including data/qdrant) are preserved; Awoki will not pass -v.
+EOF
+
+if [[ "$POLICY" == "fail" ]]; then
+  echo "[awoki] conflict policy is fail; no stale container was removed." >&2
+  exit 3
+fi
+if [[ "$POLICY" == "ask" ]]; then
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    echo "[awoki] conflict policy is ask but no interactive terminal is available; no stale container was removed." >&2
+    exit 3
+  fi
+  answer=""
+  printf '[awoki] Replace these stale containers now, preserving volumes/data? [Y/n]: ' >&2
+  IFS= read -r answer || answer=""
+  case "$answer" in
+    n|N|no|NO)
+      echo "[awoki] operator declined stale-container cleanup; nothing removed." >&2
+      exit 3
+      ;;
+    ''|y|Y|yes|YES) ;;
+    *)
+      echo "[awoki] unrecognized response; nothing removed." >&2
+      exit 3
+      ;;
+  esac
+fi
+
+echo "[awoki] removing only the stale Awoki service containers; volumes and host data remain untouched." >&2
+# Remove the exact stale containers we inspected. This is more reliable than
+# `docker compose down` for the replaced-path Docker Desktop edge because the
+# new Compose invocation may not enumerate the old container at all. `docker
+# rm` does not remove named volumes unless `-v` is requested (Awoki never does).
+for cid in $stale_ids; do
+  if ! docker rm -f "$cid" >/dev/null; then
+    echo "[awoki] automatic stale-container cleanup failed for $cid; no volume deletion was requested." >&2
+    echo "[awoki] Inspect/remove only that stale container, then rerun the installer:" >&2
+    echo "  docker rm -f $cid" >&2
+    exit 3
+  fi
+done
+
+echo "[awoki] stale Awoki containers removed safely; continuing with the current checkout." >&2

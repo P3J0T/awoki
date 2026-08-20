@@ -14,15 +14,21 @@ tmux_conf_24b_colour=auto
 tmux_conf_theme_status_left=" #S | #{pretty_pane_current_path} "
 tmux_conf_theme_status_right=" #{prefix}#{mouse}#{pairing}#{synchronized} , %R , %d %b | #{username}#{root} | #{hostname} "
 
-# Clipboard integration is deliberately disabled in the container. Copy-mode
-# still writes to tmux buffers; host clipboard forwarding can be added later as
-# an explicit trust decision.
+# Keep gpakosz's external-tool clipboard integration disabled in the Linux
+# container. tmux itself forwards completed copy-mode selections to the outside
+# terminal with OSC 52 below, so no xsel/xclip/pbcopy helper is required.
 tmux_conf_copy_to_os_clipboard=false
 
 # Awoki operational defaults.
 set -g history-limit 100000
-set -g mouse on
+# Mouse mode is off by default. In VS Code Remote-SSH/macOS terminals this keeps
+# trackpad scrolling/selection with the terminal instead of having gpakosz
+# automatically enter tmux copy-mode. Toggle it deliberately with <prefix> m.
+set -g mouse off
 set -g renumber-windows on
-set -g set-clipboard off
+# Only tmux's own copy operations may update the outside terminal clipboard.
+# This uses OSC 52 when the terminal advertises the Ms capability and avoids
+# allowing arbitrary applications inside tmux to request clipboard writes.
+set -s set-clipboard external
 set -g status-interval 5
 setw -g mode-keys vi

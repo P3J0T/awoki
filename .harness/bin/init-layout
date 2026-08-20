@@ -122,11 +122,37 @@ write_once "$GLOBAL_ROOT/README.md" \
   '- `state/registry/` — resource registry and context packs.'
 
 
-cat > "$ROOT/.harness/state/layout_initialized.json" <<EOF
+LAYOUT_MARKER="$ROOT/.harness/state/layout_initialized.json"
+runtime_instance_id=""
+if [[ -f "$LAYOUT_MARKER" && ! -L "$LAYOUT_MARKER" ]]; then
+  runtime_instance_id="$(python3 - "$LAYOUT_MARKER" <<'PY_RUNTIME_ID'
+import json
+import re
+import sys
+from pathlib import Path
+
+try:
+    value = str(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("runtime_instance_id", ""))
+except Exception:
+    value = ""
+print(value if re.fullmatch(r"[0-9a-f]{32}", value) else "")
+PY_RUNTIME_ID
+)"
+fi
+if [[ -z "$runtime_instance_id" ]]; then
+  runtime_instance_id="$(python3 - <<'PY_RUNTIME_ID_NEW'
+import secrets
+print(secrets.token_hex(16))
+PY_RUNTIME_ID_NEW
+)"
+fi
+
+cat > "$LAYOUT_MARKER" <<EOF
 {
   "status": "initialized",
   "project_root": "$ROOT",
   "global_root": "$GLOBAL_ROOT",
+  "runtime_instance_id": "$runtime_instance_id",
   "initialized_at_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF

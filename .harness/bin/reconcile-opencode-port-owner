@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+COMPOSE_FILE="${1:-docker-compose.opencode.yml}"
+PORT="${2:-}"
+LABEL="${3:-port}"
+EXPECTED_SERVICE="${4:-awoki-opencode-ssh}"
+POLICY="${AWOKI_RUNTIME_CONFLICT_POLICY:-auto}"
+EXPECTED_INSTANCE="${AWOKI_RUNTIME_INSTANCE_ID:-}"
+EXPECTED_PROJECT="${AWOKI_COMPOSE_PROJECT_NAME:-awoki}"
+REPORT_FILE="${AWOKI_PORT_OWNER_REPORT_FILE:-}"
+
+case "$POLICY" in auto|ask|fail) ;; *) echo "[awoki] invalid AWOKI_RUNTIME_CONFLICT_POLICY=$POLICY (expected auto|ask|fail)" >&2; exit 3 ;; esac
+[[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) || {
+  echo "[awoki] invalid ${LABEL} port: $PORT" >&2
+  exit 3
+}
+[[ "$EXPECTED_INSTANCE" =~ ^[0-9a-f]{32}$ ]] || {
+  echo "[awoki] ${LABEL} port-owner reconciliation requires a valid AWOKI_RUNTIME_INSTANCE_ID" >&2
+  exit 3
+}
+case "$COMPOSE_FILE" in
+  /*) ;;
+  *) COMPOSE_FILE="$ROOT/$COMPOSE_FILE" ;;
+esac
+command -v docker >/dev/null 2>&1 || { echo "[awoki] docker is unavailable" >&2; exit 3; }
+docker compose version >/dev/null 2>&1 || { echo "[awoki] docker compose is unavailable" >&2; exit 3; }
+
+canonical_path() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PY
+}
+
+EXPECTED_ROOT="$(canonical_path "$ROOT")"
+
+# Docker Desktop sometimes exposes a macOS source as /host_mnt/Users/... even
+# though Compose recorded /Users/... . Treat that spelling as the same checkout
+# only when stripping /host_mnt resolves exactly to this checkout; never use the
+# rewrite to equate two arbitrary paths.
+normalize_owner_root() {
+  local raw="$1" normal stripped
+  case "$raw" in '<no value>'|'<nil>'|'') printf '%s' ''; return 0 ;; esac
+  normal="$(canonical_path "$raw")"
+  if [[ "$raw" == /host_mnt/* ]]; then
+    stripped="${raw#/host_mnt}"
+    if [[ "$(canonical_path "$stripped")" == "$EXPECTED_ROOT" ]]; then
+      printf '%s' "$EXPECTED_ROOT"
+      return 0
+    fi
+  fi
+  printf '%s' "$normal"
+}
+
+port_is_bindable() {
+  python3 - "$PORT" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(("127.0.0.1", port))
+finally:
+    s.close()
+PY
+}
+
+port_owners() {
+  docker ps --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' \
+    | grep -E "(127\\.0\\.0\\.1|0\\.0\\.0\\.0|::|\\[::\\]):${PORT}->|:${PORT}->" || true
+}
+
+if port_is_bindable; then
+  printf 'free\n'
+  exit 0
+fi
+
+owners="$(port_owners)"
+if [[ -z "$owners" ]]; then
+  echo "[awoki] ${LABEL} port 127.0.0.1:${PORT} is already in use by a non-Docker process or an uninspectable listener." >&2
+  echo "[awoki] Inspect it with: lsof -nP -iTCP:${PORT} -sTCP:LISTEN" >&2
+  exit 3
+fi
+
+current_compose_id="$(docker compose -f "$COMPOSE_FILE" ps -q "$EXPECTED_SERVICE" 2>/dev/null | head -n 1 || true)"
+stale_ids=""
+stale_lines=()
+foreign_lines=()
+different_lines=()
+different_records=()
+current_owner=""
+
+while IFS=$'\t' read -r cid listed_name listed_ports; do
+  [[ -n "$cid" ]] || continue
+  if [[ -n "$current_compose_id" && ( "$cid" == "$current_compose_id" || "$cid" == "${current_compose_id:0:12}" || "${cid:0:12}" == "${current_compose_id:0:12}" ) ]]; then
+    current_owner="$cid"
+    continue
+  fi
+
+  actual_project="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$cid" 2>/dev/null || true)"
+  actual_service="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$cid" 2>/dev/null || true)"
+  actual_root_raw="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$cid" 2>/dev/null || true)"
+  actual_instance="$(docker inspect -f '{{ index .Config.Labels "io.awoki.runtime_instance_id" }}' "$cid" 2>/dev/null || true)"
+  actual_name="$(docker inspect -f '{{ .Name }}' "$cid" 2>/dev/null | sed 's#^/##' || true)"
+  [[ -n "$actual_name" ]] || actual_name="$listed_name"
+  case "$actual_project" in '<no value>'|'<nil>') actual_project="" ;; esac
+  case "$actual_service" in '<no value>'|'<nil>') actual_service="" ;; esac
+  case "$actual_instance" in '<no value>'|'<nil>') actual_instance="" ;; esac
+  actual_root="$(normalize_owner_root "$actual_root_raw")"
+
+  # A matching Awoki service from another checkout is a distinct, structured
+  # conflict even when that checkout uses a different Compose project name.
+  # The low-level runtime never removes it automatically; the interactive
+  # installer may offer the operator explicit stop/reconfigure/abort choices.
+  if [[ "$actual_service" == "$EXPECTED_SERVICE" && -n "$actual_root" && "$actual_root" != "$EXPECTED_ROOT" ]]; then
+    different_lines+=("[awoki]   ${actual_name:-$cid}: project=${actual_project:-unknown} service=$actual_service checkout=$actual_root runtime=${actual_instance:-legacy/missing}")
+    different_records+=("$cid"$'\t'"${actual_name:-$cid}"$'\t'"${actual_project:-}"$'\t'"$actual_service"$'\t'"$actual_root"$'\t'"${actual_instance:-}"$'\t'"$PORT")
+    continue
+  fi
+
+  if [[ "$actual_project" == "$EXPECTED_PROJECT" && "$actual_service" == "$EXPECTED_SERVICE" ]]; then
+    if [[ -z "$actual_root" ]]; then
+      foreign_lines+=("[awoki]   ${actual_name:-$cid}: Awoki/Compose labels match but checkout identity is missing")
+      continue
+    fi
+    if [[ "$actual_instance" == "$EXPECTED_INSTANCE" ]]; then
+      current_owner="$cid"
+      continue
+    fi
+    stale_ids="$stale_ids $cid"
+    stale_lines+=("[awoki]   ${actual_name:-$cid}: checkout=$actual_root runtime=${actual_instance:-legacy/missing}")
+    continue
+  fi
+
+  foreign_lines+=("[awoki]   ${actual_name:-$cid}: project=${actual_project:-unknown} service=${actual_service:-unknown} checkout=${actual_root:-unknown}")
+done <<< "$owners"
+
+if [[ -n "$current_owner" && -z "$stale_ids" && ${#foreign_lines[@]} -eq 0 && ${#different_lines[@]} -eq 0 ]]; then
+  if [[ -z "$current_compose_id" ]]; then
+    echo "[awoki] ${LABEL} port is already owned by this checkout/runtime even though docker compose ps did not enumerate it; treating it as the current Awoki service." >&2
+  fi
+  printf 'current\n'
+  exit 0
+fi
+
+if (( ${#different_lines[@]} > 0 )) && (( ${#foreign_lines[@]} == 0 )); then
+  if [[ -n "$REPORT_FILE" ]]; then
+    umask 077
+    : >"$REPORT_FILE"
+    printf '%s\n' "${different_records[@]}" >"$REPORT_FILE"
+  fi
+  echo "[awoki] ${LABEL} port 127.0.0.1:${PORT} is owned by another Awoki checkout." >&2
+  printf '%s\n' "${different_lines[@]}" >&2
+  echo "[awoki] current checkout: $EXPECTED_ROOT" >&2
+  echo "[awoki] Low-level startup will not stop or replace a different checkout automatically." >&2
+  echo "[awoki] Use ./install-awoki.sh for guided stop/reconfigure/abort choices, or resolve the conflict explicitly." >&2
+  exit 5
+fi
+
+if (( ${#foreign_lines[@]} > 0 )); then
+  echo "[awoki] ${LABEL} port 127.0.0.1:${PORT} is occupied by a container that Awoki cannot safely replace automatically." >&2
+  printf '%s\n' "${foreign_lines[@]}" >&2
+  echo "[awoki] current checkout: $EXPECTED_ROOT" >&2
+  echo "[awoki] current compose project: $EXPECTED_PROJECT" >&2
+  echo "[awoki] Refusing cleanup because the listener may belong to another checkout/service." >&2
+  echo "[awoki] Choose different ports/project settings or stop that runtime explicitly." >&2
+  exit 3
+fi
+
+if [[ -z "$stale_ids" ]]; then
+  echo "[awoki] ${LABEL} port 127.0.0.1:${PORT} is already in use." >&2
+  echo "Docker containers publishing this port:" >&2
+  printf '%s\n' "$owners" >&2
+  exit 3
+fi
+
+cat >&2 <<EOF_MSG
+[awoki] ${LABEL} port 127.0.0.1:${PORT} is held by stale Awoki container(s) from this same checkout path.
+[awoki] current checkout: $EXPECTED_ROOT
+[awoki] current runtime_instance: $EXPECTED_INSTANCE
+EOF_MSG
+printf '%s\n' "${stale_lines[@]}" >&2
+cat >&2 <<'EOF_MSG'
+[awoki] This commonly happens when a checkout is moved/deleted and recreated at the same macOS pathname while Docker Desktop keeps the old container/bind identity.
+[awoki] Safe recovery removes only the exact stale container(s). Named volumes and host data are preserved; Awoki never passes -v here.
+EOF_MSG
+
+if [[ "$POLICY" == "fail" ]]; then
+  echo "[awoki] conflict policy is fail; no stale port owner was removed." >&2
+  exit 3
+fi
+if [[ "$POLICY" == "ask" ]]; then
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    echo "[awoki] conflict policy is ask but no interactive terminal is available; no stale port owner was removed." >&2
+    exit 3
+  fi
+  answer=""
+  printf '[awoki] Replace the stale container(s) holding this port now? [Y/n]: ' >&2
+  IFS= read -r answer || answer=""
+  case "$answer" in
+    ''|y|Y|yes|YES) ;;
+    n|N|no|NO) echo "[awoki] operator declined stale-port cleanup; nothing removed." >&2; exit 3 ;;
+    *) echo "[awoki] unrecognized response; nothing removed." >&2; exit 3 ;;
+  esac
+fi
+
+for cid in $stale_ids; do
+  echo "[awoki] removing stale port owner container $cid (no volumes requested)." >&2
+  docker rm -f "$cid" >/dev/null || {
+    echo "[awoki] failed to remove stale container $cid; no volume deletion was requested." >&2
+    exit 3
+  }
+done
+
+# Docker Desktop may release a published port a fraction of a second after the
+# container disappears. Wait briefly and verify the actual socket before moving on.
+for _ in 1 2 3 4 5; do
+  if port_is_bindable; then
+    printf 'recovered\n'
+    exit 0
+  fi
+  sleep 0.2
+done
+
+echo "[awoki] stale container was removed but ${LABEL} port 127.0.0.1:${PORT} is still busy." >&2
+echo "[awoki] Inspect it with: lsof -nP -iTCP:${PORT} -sTCP:LISTEN" >&2
+exit 3

@@ -44,16 +44,123 @@ Check:
 
 Replacing or recloning an existing checkout
 
-If this filesystem path previously ran Awoki containers, detach the old service
-containers before initializing the replacement checkout:
+For a guided install, prefer:
 
-  docker compose -f docker-compose.opencode.yml down --remove-orphans || true
+  ./install-awoki.sh
 
-Do NOT add -v. This cleanup is for stale containers/bind mounts, not persistent
-Docker volumes. Docker Desktop can otherwise keep a surviving container attached
-to the deleted checkout even when the replacement checkout uses the same pathname.
+The interactive installer asks before changing an existing runtime conflict. A
+same-path container whose Awoki runtime-instance ID belongs to a replaced checkout
+can be safely removed without -v; named volumes and host data are preserved. A
+different live checkout is never stopped or replaced by the low-level launcher.
+The interactive wizard instead offers three explicit choices: stop only that other
+checkout's running Awoki/Qdrant containers and continue (containers/volumes/data
+are preserved), keep both runtimes and select a different Compose project plus free
+SSH/Web/Qdrant/Lavish ports, or abort with both checkouts untouched.
 
-Fresh install
+For a release ZIP, the optional host bootstrap can perform the outer replacement
+steps before the in-checkout wizard:
+
+  ./bootstrap-awoki.sh /path/to/awoki-release.zip /path/to/awoki
+  ./bootstrap-awoki.sh https://example.invalid/awoki.zip /path/to/awoki
+
+If the target exists it offers to move it to a timestamped backup or choose a new
+target. It does not silently rm -rf an existing checkout. Existing Docker
+containers are intentionally left for the runtime-instance conflict check, which
+can then explain exactly what belongs to the previous checkout. A normal GitHub
+Download ZIP has no .git history; the bootstrap can create a clearly labeled local
+baseline HEAD for running/testing. Use a real git clone for upstream history,
+development, or publishing.
+
+Fresh install — interactive (recommended for a person)
+
+1. Enter the writable Awoki Git checkout.
+
+2. Run:
+
+  ./install-awoki.sh
+
+The wizard covers the former manual steps: create/refresh .env, select Compose
+project/SSH/Web settings, optionally configure embeddings and reranker, initialize
+the runtime layout/SSH keys, and prepare the ignored OpenCode user config at:
+
+  .opencode-state/config/opencode.jsonc
+
+That is the recommended file in which to paste your custom OpenCode provider/model
+configuration. Before any Docker build/start the installer validates it and shows
+a pre-build review. The menu is intentionally non-eager:
+
+  1) edit OpenCode user/provider config (NO build)
+  2) edit .env (NO build)
+  3) edit Awoki's tracked opencode.jsonc (advanced; NO build)
+  4) re-run validation (NO build)
+  5) BUILD/START Docker now
+  6) stop with configuration saved
+
+Even option 5 requires a final yes/no confirmation. Docker conflict reconciliation
+is delayed until that build confirmation, so reviewing/editing configuration does
+not tear down an older runtime. If conflict resolution changes `.env` -- for example when keeping two Awoki
+runtimes alive and selecting alternate SSH/Web/Qdrant/Lavish ports -- the wizard
+runs static validation again, shows the updated redacted review, and asks again.
+After startup it can run OpenCode's provider credential-login and MCP-add workflows
+and offers the broader runtime check. Independently of that choice, the installer
+always runs a mandatory SSH-readiness gate before it can report success. That gate
+requires the host private/public key pair to exist and match, requires the running
+container to authorize the same public key, and performs a real BatchMode public-key
+login. --skip-runtime-check does not disable this SSH gate.
+
+Use:
+
+  ./install-awoki.sh --configure-only
+
+to save configuration and initialize the layout without building/starting.
+
+
+OpenCode custom provider/model configuration
+
+Awoki intentionally separates its tracked project configuration from your personal
+OpenCode provider configuration.
+
+Edit this on the macOS host:
+
+  .opencode-state/config/opencode.jsonc
+
+OpenCode sees the same bind-mounted file inside the container at:
+
+  /home/op/.config/opencode/opencode.jsonc
+
+Use this file for custom `provider`, model, and other user-level OpenCode settings.
+It is ignored by Git and excluded from the Docker build context. The tracked root
+`opencode.jsonc` belongs to the Awoki project/runtime contract (Awoki MCP, direct
+Burp MCP, instructions, permissions, compaction). `opencode.container.jsonc` is
+not the personal-provider configuration location.
+
+During first install, choose installer option 1 at the OpenCode/provider step and
+paste your JSONC into the editor. The installer validates syntax and returns to the
+pre-build menu; it will not start Docker until you explicitly choose BUILD/START.
+
+To change the custom provider config after installation:
+
+  cd /path/to/awoki
+  $EDITOR .opencode-state/config/opencode.jsonc
+  make opencode-user-config-check
+  make opencode-config-reload
+
+The reload path does not rebuild the Docker image. The user config directory is a
+runtime bind mount. The helper restarts only the OpenCode SSH/Web service and then
+checks the runtime. This restart ends active TUI/Web backend/tmux processes in that
+container, so reconnect afterward; persisted OpenCode/Awoki data remains. If the
+runtime is currently stopped, no restart is needed: the next start reads the file.
+
+For provider credentials, prefer OpenCode's credential flow when supported:
+
+  make opencode-auth
+
+OpenCode stores its credential state under its persisted application-data mount,
+separate from the JSONC. If your custom provider requires a literal credential in
+the user JSONC, that file is still plaintext on the host even though Awoki ignores
+it in Git and Docker builds.
+
+Fresh install — deterministic/manual (automation)
 
 1. Enter the writable Awoki Git checkout.
 
@@ -69,13 +176,6 @@ only when you intend to use a remote reranker.
 
   ./init-awoki.sh
 
-This creates the ignored runtime layout, including workspace/, data/,
-.ssh-container/, .opencode-state/, and .harness/state/. The SSH client key pair
-is generated on the host. At runtime Awoki injects only the validated public key
-into the container; the private key remains host-only. OpenCode Web auth is
-materialized by the guarded launcher: an empty stock password setting generates
-a persistent random `.opencode-state/web-auth/password` with mode 0600 under 0700 state/auth directories.
-
 4. Run host preflight:
 
   make dependencies-check
@@ -85,15 +185,7 @@ a persistent random `.opencode-state/web-auth/password` with mode 0600 under 070
 
   make install-opencode-ssh
 
-By default a fresh image resolves the current OpenCode CLI and aligns the local
-OpenCode plugin/SDK packages to that exact resolved version. This is
-"latest / untested" until your own validation proves the stack acceptable.
-The running container does not silently auto-update. OpenCode Web is enabled by
-default and published only on host loopback at http://127.0.0.1:4096. Show its
-password explicitly with `make opencode-web-password`; the username defaults to
-`opencode`.
-
-6. Validate the running OpenCode runtime only after step 5 succeeds:
+6. Validate only after step 5 succeeds:
 
   make opencode-runtime-check
 
@@ -101,12 +193,15 @@ If make install-opencode-ssh / make opencode-ssh-up fails, stop there and fix th
 startup failure first. Do not run opencode-runtime-check against an old or partially
 started container; secondary runtime errors can hide the original startup problem.
 
-7. Connect using the SSH command printed by the installer. Default:
+7. Confirm the hard SSH client contract (the guided installer already does this):
 
-  ssh -i .ssh-container/id_ed25519 -p 2222 op@127.0.0.1
+  make opencode-ssh-client-check
 
-8. Inside the container, start or reattach the recommended tmux session, then
-attach the TUI to the already-running Web backend:
+Then connect using the absolute-path SSH command printed by the installer. Example:
+
+  ssh -i "/path/to/awoki/.ssh-container/id_ed25519" -o IdentitiesOnly=yes -o UserKnownHostsFile="/path/to/awoki/.ssh-container/known_hosts" -o StrictHostKeyChecking=accept-new -p 2222 op@127.0.0.1
+
+8. Inside the container:
 
   cd /awoki
   tmux new -A -s awoki
@@ -115,9 +210,8 @@ attach the TUI to the already-running Web backend:
 `awoki-opencode` uses `opencode attach` when Web is enabled, so browser and TUI
 share sessions/state. It supplies Basic-Auth through process environment, not a
 `--password` argument. With AWOKI_OPENCODE_WEB_ENABLED=0 it runs standalone
-`opencode`. Do not use a custom --config path for normal operation.
-/awoki/opencode.jsonc is the project configuration and loads Awoki through the
-reviewed MCP launcher.
+`opencode`. /awoki/opencode.jsonc remains the project configuration and loads
+Awoki through the reviewed MCP launcher.
 
 Why tmux
 

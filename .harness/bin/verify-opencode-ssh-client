@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+COMPOSE_FILE="${AWOKI_OPENCODE_COMPOSE_FILE:-$ROOT/docker-compose.opencode.yml}"
+SSH_DIR="$ROOT/.ssh-container"
+PRIVATE_KEY="$SSH_DIR/id_ed25519"
+PUBLIC_KEY="$SSH_DIR/id_ed25519.pub"
+QUIET=0
+
+usage() {
+  cat <<'USAGE'
+Usage: .harness/bin/verify-opencode-ssh-client [--quiet]
+
+Hard post-start check for the host-side Awoki SSH client contract:
+- private/public key files exist and are regular files;
+- the public key is derived from the private key;
+- the running OpenCode SSH container has the same authorized key;
+- an actual BatchMode SSH login succeeds.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --quiet) QUIET=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "[awoki] unknown SSH client verification option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+fail() {
+  echo "[awoki] OpenCode SSH client verification failed: $*" >&2
+  exit 3
+}
+
+read_env_default() {
+  local key="$1" default_value="$2" value=""
+  if [[ -f "$ROOT/.env" ]]; then
+    value="$(awk -F= -v k="$key" '
+      $0 ~ /^[[:space:]]*#/ { next }
+      $0 !~ /=/ { next }
+      {
+        key=$1
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", key)
+        if (key == k) {
+          sub(/^[^=]*=/, "")
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+          gsub(/^"|"$/, "")
+          print
+        }
+      }
+    ' "$ROOT/.env" | tail -n 1)"
+  fi
+  printf '%s' "${value:-$default_value}"
+}
+
+SSH_PORT="${AWOKI_OPENCODE_SSH_PORT:-$(read_env_default AWOKI_OPENCODE_SSH_PORT 2222)}"
+[[ "$SSH_PORT" =~ ^[0-9]+$ ]] && (( SSH_PORT >= 1 && SSH_PORT <= 65535 )) || fail "invalid SSH port: $SSH_PORT"
+
+for tool in ssh ssh-keygen docker; do
+  command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
+done
+docker compose version >/dev/null 2>&1 || fail "docker compose is unavailable"
+[[ -f "$COMPOSE_FILE" ]] || fail "compose file does not exist: $COMPOSE_FILE"
+
+for path in "$SSH_DIR" "$PRIVATE_KEY" "$PUBLIC_KEY"; do
+  [[ ! -L "$path" ]] || fail "SSH material must not be a symlink: $path"
+done
+[[ -d "$SSH_DIR" ]] || fail "host SSH directory is missing: $SSH_DIR (run ./init-awoki.sh)"
+[[ -s "$PRIVATE_KEY" && -f "$PRIVATE_KEY" ]] || fail "host SSH private key is missing/empty: $PRIVATE_KEY (run ./init-awoki.sh)"
+[[ -s "$PUBLIC_KEY" && -f "$PUBLIC_KEY" ]] || fail "host SSH public key is missing/empty: $PUBLIC_KEY (run ./init-awoki.sh)"
+
+umask 077
+derived_pub="$(mktemp "${TMPDIR:-/tmp}/awoki-derived-pub.XXXXXX")"
+container_pub="$(mktemp "${TMPDIR:-/tmp}/awoki-container-pub.XXXXXX")"
+cleanup() { rm -f "$derived_pub" "$container_pub" 2>/dev/null || true; }
+trap cleanup EXIT HUP INT TERM
+
+if ! ssh-keygen -y -f "$PRIVATE_KEY" >"$derived_pub" 2>/dev/null; then
+  fail "host SSH private key is unreadable/invalid: $PRIVATE_KEY"
+fi
+
+normalize_key() {
+  awk 'NF >= 2 { print $1 " " $2; exit }' "$1"
+}
+
+derived_normalized="$(normalize_key "$derived_pub")"
+public_normalized="$(normalize_key "$PUBLIC_KEY")"
+public_lines="$(grep -cve '^[[:space:]]*$' "$PUBLIC_KEY" || true)"
+[[ "$public_lines" == "1" ]] || fail "host SSH public key must contain exactly one non-empty key line: $PUBLIC_KEY"
+[[ -n "$derived_normalized" && -n "$public_normalized" ]] || fail "host SSH public key is not a valid single public-key line: $PUBLIC_KEY"
+[[ "$derived_normalized" == "$public_normalized" ]] || fail "host SSH public key does not match the private key; rerun ./init-awoki.sh after resolving the key files"
+ssh-keygen -lf "$PUBLIC_KEY" >/dev/null 2>&1 || fail "host SSH public key is invalid: $PUBLIC_KEY"
+
+container_id="$(docker compose -f "$COMPOSE_FILE" ps -q awoki-opencode-ssh 2>/dev/null | head -n 1)"
+[[ -n "$container_id" ]] || fail "OpenCode SSH service container is not running"
+[[ "$(docker inspect -f '{{.State.Running}}' "$container_id" 2>/dev/null || true)" == "true" ]] || fail "OpenCode SSH service container is not running: $container_id"
+
+if ! docker exec "$container_id" cat /home/op/.ssh/authorized_keys >"$container_pub" 2>/dev/null; then
+  fail "cannot read /home/op/.ssh/authorized_keys from running container $container_id"
+fi
+container_lines="$(grep -cve '^[[:space:]]*$' "$container_pub" || true)"
+[[ "$container_lines" == "1" ]] || fail "container authorized_keys must contain exactly one non-empty key line"
+container_normalized="$(normalize_key "$container_pub")"
+[[ -n "$container_normalized" ]] || fail "container authorized_keys is empty/invalid"
+if [[ "$container_normalized" != "$public_normalized" ]]; then
+  echo "[awoki] host public-key fingerprint:" >&2
+  ssh-keygen -lf "$PUBLIC_KEY" >&2 || true
+  echo "[awoki] container authorized-key fingerprint:" >&2
+  ssh-keygen -lf "$container_pub" >&2 || true
+  fail "running container is authorized for a different SSH key; rerun make opencode-ssh-up to reconcile this checkout"
+fi
+
+known_hosts="$SSH_DIR/known_hosts"
+touch "$known_hosts"
+chmod 600 "$known_hosts" 2>/dev/null || true
+
+attempts="${AWOKI_SSH_VERIFY_ATTEMPTS:-10}"
+delay="${AWOKI_SSH_VERIFY_DELAY_SECONDS:-0.5}"
+[[ "$attempts" =~ ^[0-9]+$ ]] && (( attempts >= 1 && attempts <= 60 )) || fail "invalid AWOKI_SSH_VERIFY_ATTEMPTS=$attempts"
+
+ssh_ok=0
+for (( attempt=1; attempt<=attempts; attempt++ )); do
+  if ssh \
+    -i "$PRIVATE_KEY" \
+    -o IdentitiesOnly=yes \
+    -o BatchMode=yes \
+    -o ConnectTimeout=2 \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile="$known_hosts" \
+    -p "$SSH_PORT" \
+    op@127.0.0.1 true >/dev/null 2>&1; then
+    ssh_ok=1
+    break
+  fi
+  if (( attempt < attempts )); then sleep "$delay"; fi
+done
+
+if (( ! ssh_ok )); then
+  echo "[awoki] local SSH key: $PRIVATE_KEY" >&2
+  echo "[awoki] local public-key fingerprint:" >&2
+  ssh-keygen -lf "$PUBLIC_KEY" >&2 || true
+  echo "[awoki] running container: $container_id" >&2
+  echo "[awoki] SSH endpoint: 127.0.0.1:$SSH_PORT" >&2
+  echo "[awoki] dedicated known_hosts: $known_hosts" >&2
+  echo "[awoki] manual diagnostic command:" >&2
+  printf '  ssh -vvv -i %q -o IdentitiesOnly=yes -o UserKnownHostsFile=%q -p %q op@127.0.0.1\n' "$PRIVATE_KEY" "$known_hosts" "$SSH_PORT" >&2
+  fail "public-key BatchMode login did not succeed; installation is incomplete"
+fi
+
+if (( ! QUIET )); then
+  printf 'awoki_opencode_ssh_client=ok port=%s key=%s\n' "$SSH_PORT" "$PRIVATE_KEY"
+fi

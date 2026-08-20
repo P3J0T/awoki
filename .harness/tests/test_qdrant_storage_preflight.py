@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -10,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / '.harness' / 'bin' / 'prepare-qdrant-storage'
 WAIT_SCRIPT = ROOT / '.harness' / 'bin' / 'wait-qdrant'
+RECONCILE_SCRIPT = ROOT / '.harness' / 'bin' / 'reconcile-opencode-runtime'
 
 
 class QdrantStoragePreflightTests(unittest.TestCase):
@@ -102,6 +104,182 @@ class QdrantStoragePreflightTests(unittest.TestCase):
         self.assertLess(launcher.index(qdrant_up), launcher.index(wait))
         self.assertLess(launcher.index(wait), launcher.index(live))
         self.assertLess(launcher.index(live), launcher.index(opencode))
+
+
+
+    def test_init_layout_runtime_instance_is_stable_until_marker_is_recreated(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bindir = root / '.harness' / 'bin'
+            bindir.mkdir(parents=True)
+            for source in (ROOT / '.harness' / 'bin' / 'init-layout', ROOT / '.harness' / 'bin' / 'prepare-qdrant-storage'):
+                target = bindir / source.name
+                target.write_bytes(source.read_bytes())
+                target.chmod(0o755)
+            fake_keys = bindir / 'prepare-opencode-ssh-keys'
+            fake_keys.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+            fake_keys.chmod(0o755)
+            env = os.environ.copy()
+            env['AWOKI_ROOT'] = str(root)
+            first = subprocess.run([str(bindir / 'init-layout')], env=env, capture_output=True, text=True)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            marker = root / '.harness' / 'state' / 'layout_initialized.json'
+            first_id = json.loads(marker.read_text(encoding='utf-8'))['runtime_instance_id']
+            self.assertRegex(first_id, r'^[0-9a-f]{32}$')
+
+            second = subprocess.run([str(bindir / 'init-layout')], env=env, capture_output=True, text=True)
+            self.assertEqual(second.returncode, 0, second.stderr)
+            second_id = json.loads(marker.read_text(encoding='utf-8'))['runtime_instance_id']
+            self.assertEqual(second_id, first_id)
+
+            marker.unlink()
+            third = subprocess.run([str(bindir / 'init-layout')], env=env, capture_output=True, text=True)
+            self.assertEqual(third.returncode, 0, third.stderr)
+            third_id = json.loads(marker.read_text(encoding='utf-8'))['runtime_instance_id']
+            self.assertRegex(third_id, r'^[0-9a-f]{32}$')
+            self.assertNotEqual(third_id, first_id)
+
+    def _fake_reconcile_env(self, root: Path, *, working_dir: str, instance_id: str):
+        bindir = root / 'fake-reconcile-bin'
+        bindir.mkdir()
+        log = root / 'reconcile-docker.log'
+        fake = bindir / 'docker'
+        fake.write_text(textwrap.dedent('''\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            echo "$*" >> "$FAKE_DOCKER_LOG"
+            if [[ "${1:-}" == "compose" && "${2:-}" == "version" ]]; then exit 0; fi
+            if [[ "${1:-}" == "compose" && "$*" == *" ps -a -q qdrant"* ]]; then
+              [[ "${FAKE_COMPOSE_VISIBLE:-1}" == "1" ]] && echo fake-qdrant
+              exit 0
+            fi
+            if [[ "${1:-}" == "compose" && "$*" == *" ps -a -q awoki-opencode-ssh"* ]]; then
+              [[ "${FAKE_COMPOSE_VISIBLE:-1}" == "1" ]] && echo fake-opencode
+              exit 0
+            fi
+            if [[ "${1:-}" == "ps" && "$*" == *"label=com.docker.compose.service=qdrant"* ]]; then echo fake-qdrant; exit 0; fi
+            if [[ "${1:-}" == "ps" && "$*" == *"label=com.docker.compose.service=awoki-opencode-ssh"* ]]; then echo fake-opencode; exit 0; fi
+            if [[ "${1:-}" == "inspect" ]]; then
+              template="${3:-}"
+              cid="${4:-}"
+              if [[ "$template" == *"project.working_dir"* ]]; then echo "$FAKE_RUNTIME_WORKDIR"
+              elif [[ "$template" == *"io.awoki.runtime_instance_id"* ]]; then echo "$FAKE_RUNTIME_INSTANCE"
+              elif [[ "$template" == *".Name"* ]]; then echo "/$cid"
+              fi
+              exit 0
+            fi
+            if [[ "${1:-}" == "compose" && "$*" == *" down --remove-orphans"* ]]; then exit "${FAKE_DOWN_STATUS:-0}"; fi
+            exit 0
+        '''), encoding='utf-8')
+        fake.chmod(0o755)
+        compose = root / 'docker-compose.opencode.yml'
+        compose.write_text('services:\n  qdrant:\n    image: qdrant/qdrant:v1.18.2\n  awoki-opencode-ssh:\n    image: awoki-opencode-ssh:latest\n', encoding='utf-8')
+        env = os.environ.copy()
+        env['PATH'] = str(bindir) + os.pathsep + env.get('PATH', '')
+        env['AWOKI_ROOT'] = str(root)
+        env['AWOKI_RUNTIME_INSTANCE_ID'] = 'b' * 32
+        env['FAKE_DOCKER_LOG'] = str(log)
+        env['FAKE_RUNTIME_WORKDIR'] = working_dir
+        env['FAKE_RUNTIME_INSTANCE'] = instance_id
+        env['FAKE_DOWN_STATUS'] = '0'
+        env['FAKE_COMPOSE_VISIBLE'] = '1'
+        return env, compose, log
+
+    def test_reconcile_same_path_stale_runtime_explains_and_removes_without_volumes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env, compose, log = self._fake_reconcile_env(root, working_dir=str(root), instance_id='a' * 32)
+            result = subprocess.run([str(RECONCILE_SCRIPT), str(compose)], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Detected stale Awoki containers', result.stderr)
+            self.assertIn('Docker Desktop can retain bind mounts', result.stderr)
+            self.assertIn('Persistent named volumes and host data', result.stderr)
+            docker_log = log.read_text(encoding='utf-8')
+            self.assertIn('rm -f fake-qdrant', docker_log)
+            self.assertIn('rm -f fake-opencode', docker_log)
+            self.assertNotIn('rm -v', docker_log)
+            self.assertNotIn('down --remove-orphans', docker_log)
+
+
+    def test_reconcile_finds_same_path_stale_runtime_even_when_compose_ps_cannot_see_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env, compose, log = self._fake_reconcile_env(root, working_dir=str(root), instance_id='a' * 32)
+            env['FAKE_COMPOSE_VISIBLE'] = '0'
+            result = subprocess.run([str(RECONCILE_SCRIPT), str(compose)], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('Detected stale Awoki containers', result.stderr)
+            docker_log = log.read_text(encoding='utf-8')
+            self.assertIn('ps -a --filter label=com.docker.compose.service=qdrant -q', docker_log)
+            self.assertIn('ps -a --filter label=com.docker.compose.service=awoki-opencode-ssh -q', docker_log)
+            self.assertIn('rm -f fake-qdrant', docker_log)
+            self.assertIn('rm -f fake-opencode', docker_log)
+
+    def test_reconcile_legacy_same_path_runtime_is_treated_as_stale(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env, compose, log = self._fake_reconcile_env(root, working_dir=str(root), instance_id='<no value>')
+            result = subprocess.run([str(RECONCILE_SCRIPT), str(compose)], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('legacy/missing', result.stderr)
+            self.assertIn('rm -f fake-qdrant', log.read_text(encoding='utf-8'))
+            self.assertIn('rm -f fake-opencode', log.read_text(encoding='utf-8'))
+
+    def test_reconcile_fail_policy_explains_stale_runtime_without_removing_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env, compose, log = self._fake_reconcile_env(root, working_dir=str(root), instance_id='a' * 32)
+            env['AWOKI_RUNTIME_CONFLICT_POLICY'] = 'fail'
+            result = subprocess.run([str(RECONCILE_SCRIPT), str(compose)], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 3)
+            self.assertIn('conflict policy is fail', result.stderr)
+            self.assertNotIn('rm -f fake-qdrant', log.read_text(encoding='utf-8'))
+            self.assertNotIn('rm -f fake-opencode', log.read_text(encoding='utf-8'))
+
+    def test_reconcile_ask_policy_without_tty_refuses_cleanup(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env, compose, log = self._fake_reconcile_env(root, working_dir=str(root), instance_id='a' * 32)
+            env['AWOKI_RUNTIME_CONFLICT_POLICY'] = 'ask'
+            result = subprocess.run([str(RECONCILE_SCRIPT), str(compose)], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 3)
+            self.assertIn('no interactive terminal is available', result.stderr)
+            self.assertNotIn('rm -f fake-qdrant', log.read_text(encoding='utf-8'))
+            self.assertNotIn('rm -f fake-opencode', log.read_text(encoding='utf-8'))
+
+    def test_reconcile_matching_runtime_does_not_remove_containers(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            current = 'b' * 32
+            env, compose, log = self._fake_reconcile_env(root, working_dir=str(root), instance_id=current)
+            result = subprocess.run([str(RECONCILE_SCRIPT), str(compose)], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn('rm -f fake-qdrant', log.read_text(encoding='utf-8'))
+            self.assertNotIn('rm -f fake-opencode', log.read_text(encoding='utf-8'))
+            self.assertEqual(result.stderr, '')
+
+    def test_reconcile_different_checkout_refuses_automatic_cleanup(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            other = root.parent / (root.name + '-other')
+            env, compose, log = self._fake_reconcile_env(root, working_dir=str(other), instance_id='a' * 32)
+            result = subprocess.run([str(RECONCILE_SCRIPT), str(compose)], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 4)
+            self.assertIn('belongs to a different checkout', result.stderr)
+            self.assertIn('Refusing automatic cleanup', result.stderr)
+            self.assertNotIn('rm -f fake-qdrant', log.read_text(encoding='utf-8'))
+            self.assertNotIn('rm -f fake-opencode', log.read_text(encoding='utf-8'))
+
+    def test_launcher_reconciles_runtime_before_qdrant_bind_probe(self):
+        launcher = (ROOT / '.harness' / 'bin' / 'run-opencode-ssh').read_text(encoding='utf-8')
+        reconcile = '"$ROOT/.harness/bin/reconcile-opencode-runtime" "$COMPOSE_FILE"'
+        preflight = '"$ROOT/.harness/bin/prepare-qdrant-storage" "$COMPOSE_FILE"'
+        self.assertIn(reconcile, launcher)
+        self.assertIn(preflight, launcher)
+        self.assertLess(launcher.index(reconcile), launcher.index(preflight))
+        init_layout = (ROOT / '.harness' / 'bin' / 'init-layout').read_text(encoding='utf-8')
+        self.assertIn('runtime_instance_id', init_layout)
+        self.assertIn('secrets.token_hex(16)', init_layout)
 
     def test_wait_qdrant_internal_probe_uses_compose_network(self):
         with tempfile.TemporaryDirectory() as td:

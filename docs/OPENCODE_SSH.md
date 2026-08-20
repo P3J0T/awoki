@@ -29,14 +29,19 @@ OpenCode runs inside `awoki-opencode-ssh`. With the stock `AWOKI_OPENCODE_WEB_EN
 cp .env.example .env
 ./init-awoki.sh
 make install-opencode-ssh
+make opencode-ssh-client-check  # host keypair + container authorized key + real login
 make opencode-web-password   # explicit secret display; username defaults to opencode
 # Browser: http://127.0.0.1:${AWOKI_OPENCODE_WEB_PORT:-4096}
-ssh -i .ssh-container/id_ed25519 -p ${AWOKI_OPENCODE_SSH_PORT:-2222} op@127.0.0.1
+ssh -i "$PWD/.ssh-container/id_ed25519" -o IdentitiesOnly=yes -o UserKnownHostsFile="$PWD/.ssh-container/known_hosts" -o StrictHostKeyChecking=accept-new -p ${AWOKI_OPENCODE_SSH_PORT:-2222} op@127.0.0.1
 cd /awoki
 awoki-opencode
 ```
 
+Startup treats SSH client readiness as a hard contract, not a warning. Before `make install-opencode-ssh` / `make opencode-ssh-up` succeeds, Awoki requires the host private/public key pair to exist and match, requires the running container's `/home/op/.ssh/authorized_keys` to match that public key, and performs a real `BatchMode` public-key login. `make opencode-ssh-client-check` repeats that exact gate and is also run by the interactive installer immediately before it can print installation success.
+
 `awoki-opencode` is the supported interactive wrapper. With Web enabled it loads the runtime-only password from `/run/awoki/opencode-web-password` and executes `opencode attach` without putting the password in process arguments. With `AWOKI_OPENCODE_WEB_ENABLED=0` it falls back to standalone `opencode`. Project configuration remains `opencode.jsonc`; project skills and commands are under `.opencode/`.
+
+A replaced checkout at the same macOS pathname is handled explicitly. The ignored `layout_initialized.json` carries a per-checkout `runtime_instance_id`, and both long-lived OpenCode Compose services are labeled with it. Before Qdrant bind probing, the launcher inspects existing service containers. It also classifies the exact Docker owner of the configured SSH/Web ports, because Docker Desktop can leave an orphan publishing a port even when the new `docker compose ps` no longer enumerates that container. Same-checkout stale owners are identified by Compose project/service plus checkout/runtime identity; `/host_mnt/...` is treated as the equivalent macOS path only when it resolves to the current checkout. Safe cleanup removes only the exact stale container IDs with `docker rm -f` and never requests volume deletion, so named volumes and host Qdrant data remain intact. A different-checkout/service owner or a non-Docker listener is never removed automatically; startup fails with the owner details instead.
 
 Fresh image builds resolve OpenCode in **latest / untested** mode by default. The CLI is
 resolved first, then `@opencode-ai/plugin` and `@opencode-ai/sdk` are materialized at the
@@ -65,7 +70,7 @@ Remote embeddings: operator-configured OpenAI-compatible endpoint
 Remote reranker: optional operator-configured endpoint
 ```
 
-Qdrant host ports, SSH, OpenCode Web, and Lavish are published only on macOS loopback. OpenCode Web binds `0.0.0.0` only inside the container so Docker can forward the loopback host port; mDNS is not enabled. Non-loopback Web exposure is intentionally out of scope until an authenticated TLS reverse-proxy design is added. No host network mode is required.
+Qdrant host ports, SSH, OpenCode Web, and Lavish are published only on host loopback. OpenCode Web binds `0.0.0.0` only inside the container so Docker can forward the loopback host port; mDNS is not enabled. Non-loopback Web exposure is intentionally out of scope until an authenticated TLS reverse-proxy design is added. No host network mode is required.
 
 ## Writable mounts
 
@@ -81,7 +86,7 @@ Awoki source is baked into the image. The normal service mounts only:
 ./.awoki-global                -> /global
 .opencode-state/share           -> OpenCode application/session data
 .opencode-state/local-state     -> OpenCode local state
-.opencode-state/config          -> OpenCode user configuration
+.opencode-state/config          -> OpenCode user configuration; personal provider/model config lives in `.opencode-state/config/opencode.jsonc`
 .opencode-state/cache           -> OpenCode/plugin and Neovim caches
 .opencode-state/npm             -> npm/npx cache
 .opencode-state/web-auth          -> read-only `/awoki-web-auth`; generated Web password at rest
@@ -90,6 +95,13 @@ named volume                   -> persistent SSH server host keys
 named volumes                  -> Neovim data/state
 ```
 
+
+
+### Custom provider configuration
+
+Use the host file `.opencode-state/config/opencode.jsonc` for personal provider/model settings. It is bind-mounted as `/home/op/.config/opencode/opencode.jsonc`, ignored by Git, and excluded from the Docker build context. Do not put personal provider secrets into Awoki's tracked root `opencode.jsonc` unless you intentionally want a source-level configuration change.
+
+After editing the user file on an installed runtime, run `make opencode-user-config-check` and `make opencode-config-reload`. A config reload restarts the OpenCode SSH/Web service (so live TUI/Web/tmux processes end) but does not rebuild the image or delete persisted state. For provider credentials supported by OpenCode's auth flow, use `make opencode-auth`.
 
 ### OpenCode Web authentication and file permissions
 
@@ -153,6 +165,8 @@ rebuild/recreate this runtime image.
 
 Node 22 is pinned in the image for OpenCode and ad-hoc Lavish. Both Neovim and tmux are installed. tmux is the recommended wrapper for interactive Awoki/OpenCode work because it keeps the terminal process alive when the SSH transport disappears. It is not part of Awoki's epistemic correctness model and does not replace Awoki's durable project/continuity state.
 
+For macOS editor use, the preferred graphical workflow is VS Code **Remote - SSH** connecting to the same Awoki SSH endpoint. No OpenCode VS Code extension is required: open `/awoki` or the exact container-side managed repository in VS Code and run the commands below in VS Code's integrated remote terminal. This avoids host/container path translation and does not create another OpenCode backend.
+
 After SSH login:
 
 ```bash
@@ -178,7 +192,22 @@ Create extra windows with `<prefix> c` and switch with normal tmux bindings. The
 
 **Persistence boundary:** tmux sessions survive SSH disconnects but do not survive container stop/recreation. The Web backend also ends on container recreation and is restarted by the entrypoint; OpenCode application/session data remains on the mounted `.opencode-state` paths. After `make opencode-recreate`, SSH into the new container, create/attach `awoki` again, and run `awoki-opencode` to attach to the restarted backend.
 
-Use `<prefix> r` to reload and `<prefix> e` to edit the local tmux layer. Edits made inside the running container are lost on recreation; persist them in `.harness/config/tmux.conf.local` and rebuild. Awoki retains the current path in new sessions/windows/panes, enables mouse and vi copy mode, keeps 100,000 history lines, and leaves OS clipboard forwarding disabled. The image build and entrypoint run `.harness/bin/tmux-check` as a startup smoke test; `make opencode-runtime-check` repeats the tmux and MCP checks against a running container.
+Use `<prefix> r` to reload and `<prefix> e` to edit the local tmux layer. Edits made inside the running container are lost on recreation; persist them in `.harness/config/tmux.conf.local` and rebuild.
+
+Awoki retains the current path in new sessions/windows/panes, uses vi copy mode, keeps 100,000 history lines, and defaults **mouse mode off**. gpakosz/Oh my tmux! deliberately enters copy-mode when mouse selection is active, which makes Mac touchpad scrolling surprising in VS Code/SSH terminals. Toggle mouse mode with `<prefix> m` when needed.
+
+For copy-mode use `<prefix> Enter`, then `v` to select and `y` to copy. Traditional tmux uses `Ctrl-b [` for copy-mode and `Ctrl-b ]` for pasting a buffer; `]` is not the copy-mode key. Awoki configures tmux `set-clipboard external`, so tmux copy operations can use OSC 52 to update the outside terminal/host clipboard without allowing arbitrary applications inside tmux to request clipboard writes through tmux. The gpakosz `tmux_conf_copy_to_os_clipboard` external-tool path remains disabled because a headless Linux container has no macOS `pbcopy` process.
+
+VS Code added OSC 52 terminal clipboard support in 1.91. When using VS Code Remote-SSH, keep the local setting `terminal.integrated.enableOsc52=true`. `terminal.integrated.macOptionClickForcesSelection=true` is also useful when mouse mode is temporarily enabled because Option-drag can force normal terminal selection on macOS.
+
+Verify the negotiated tmux clipboard capability inside tmux with:
+
+```bash
+tmux show -s set-clipboard
+tmux info | grep 'Ms:'
+```
+
+The expected first value is `external`; `Ms` should not be reported as `[missing]`. The image build and entrypoint run `.harness/bin/tmux-check` as a startup smoke test; `make opencode-runtime-check` repeats the tmux and MCP checks against a running container.
 
 ## Awoki MCP startup
 
