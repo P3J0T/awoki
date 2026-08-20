@@ -133,6 +133,13 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("must be a regular file, not a symlink", rejected.stderr)
 
+    def test_opencode_launcher_uses_identity_aware_port_owner_reconciliation(self) -> None:
+        launcher = (ROOT / ".harness" / "bin" / "run-opencode-ssh").read_text(encoding="utf-8")
+        self.assertIn("reconcile-opencode-port-owner", launcher)
+        self.assertIn('check_published_port "SSH" "$SSH_PORT" awoki-opencode-ssh', launcher)
+        self.assertIn('check_published_port "OpenCode Web" "$WEB_PORT" awoki-opencode-ssh', launcher)
+        self.assertNotIn('Docker containers publishing this port:', launcher)
+
     def test_opencode_compose_avoids_docker_desktop_single_file_authorized_keys_bind(self) -> None:
         compose = (ROOT / "docker-compose.opencode.yml").read_text(encoding="utf-8")
         self.assertIn("AWOKI_SSH_AUTHORIZED_KEY: ${AWOKI_SSH_AUTHORIZED_KEY:-}", compose)
@@ -460,7 +467,9 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("tmux_conf_new_pane_retain_current_path=true", local)
         self.assertIn("tmux_conf_copy_to_os_clipboard=false", local)
         self.assertIn("set -g history-limit 100000", local)
-        self.assertIn("set -g mouse on", local)
+        self.assertIn("set -g mouse off", local)
+        self.assertIn("set -s set-clipboard external", local)
+        self.assertNotIn("set -g set-clipboard off", local)
         self.assertIn("setw -g mode-keys vi", local)
 
     def test_opencode_image_installs_and_validates_tmux_without_network_bootstrap(self) -> None:

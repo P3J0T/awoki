@@ -86,6 +86,11 @@ def validate_compose_shape(path: Path, expected_services: list[str] | None = Non
     assert qdrant_ports and all(str(port).startswith("127.0.0.1:") for port in qdrant_ports), (
         f"{path.name} must publish Qdrant only on host loopback"
     )
+    if path.name == "docker-compose.opencode.yml":
+        qdrant_labels = services["qdrant"].get("labels", {})
+        assert qdrant_labels.get("io.awoki.runtime_instance_id") == "${AWOKI_RUNTIME_INSTANCE_ID:-uninitialized}", (
+            "OpenCode Qdrant must carry the checkout runtime-instance identity"
+        )
     service_name = "awoki-mcp" if "awoki-mcp" in services else "awoki-opencode-ssh" if "awoki-opencode-ssh" in services else ""
     if service_name:
         env = services[service_name].get("environment", {})
@@ -129,6 +134,10 @@ def validate_compose_shape(path: Path, expected_services: list[str] | None = Non
         assert env.get("AWOKI_OPENCODE_WEB_ENABLED") == "${AWOKI_OPENCODE_WEB_ENABLED:-1}", "OpenCode Web must be enabled by default"
         assert env.get("AWOKI_OPENCODE_WEB_PORT") == "${AWOKI_OPENCODE_WEB_PORT:-4096}", "OpenCode Web port must be configurable"
         assert env.get("AWOKI_OPENCODE_WEB_USERNAME") == "${AWOKI_OPENCODE_WEB_USERNAME:-opencode}", "OpenCode Web username must be configurable"
+        labels = svc.get("labels", {})
+        assert labels.get("io.awoki.runtime_instance_id") == "${AWOKI_RUNTIME_INSTANCE_ID:-uninitialized}", (
+            "OpenCode SSH container must carry the checkout runtime-instance identity"
+        )
         assert "AWOKI_OPENCODE_WEB_PASSWORD" not in env and "OPENCODE_SERVER_PASSWORD" not in env, "OpenCode Web password must not be stored in Compose service environment"
         assert not any(
             isinstance(v, dict) and v.get("source") == "./.ssh-container/authorized_keys"
@@ -157,6 +166,11 @@ def validate_launcher() -> None:
     assert 'check_published_port "OpenCode Web" "$WEB_PORT"' in script, "SSH launcher must preflight Web port conflicts"
     assert 'opencode-ssh-public-key")"' in script, "SSH launcher must derive and export the validated public key before Compose starts"
     assert 'export AWOKI_SSH_AUTHORIZED_KEY' in script, "SSH launcher must export only the public key to Compose"
+    assert 'export AWOKI_RUNTIME_INSTANCE_ID' in script, "SSH launcher must export the initialized checkout runtime identity"
+    assert 'reconcile-opencode-runtime" "$COMPOSE_FILE"' in script, "SSH launcher must reconcile stale same-path containers before bind probes"
+    reconcile = (ROOT / ".harness" / "bin" / "reconcile-opencode-runtime").read_text(encoding="utf-8")
+    assert 'docker rm -f "$cid"' in reconcile and 'docker rm -fv' not in reconcile and 'docker rm -v' not in reconcile, "stale runtime cleanup must remove only inspected containers without deleting volumes"
+    assert "different checkout" in reconcile and "Refusing automatic cleanup" in reconcile, "cross-checkout Compose conflicts must fail closed"
     helper = (ROOT / ".harness" / "bin" / "prepare-opencode-ssh-keys").read_text(encoding="utf-8")
     public_key_helper = (ROOT / ".harness" / "bin" / "opencode-ssh-public-key").read_text(encoding="utf-8")
     assert "ssh-keygen -y -f" in helper, "SSH key bootstrap must keep the public key synchronized with the private key"
@@ -188,6 +202,7 @@ def validate_layout_files() -> None:
         ROOT / ".harness" / "bin" / "opencode-web-password",
         ROOT / ".harness" / "bin" / "opencode-web-health",
         ROOT / ".harness" / "bin" / "awoki-opencode",
+        ROOT / ".harness" / "bin" / "reconcile-opencode-runtime",
         ROOT / ".harness" / "index" / "README.md",
         ROOT / ".harness" / "state" / "README.md",
         ROOT / ".harness" / "artifacts" / "burp" / "README.md",
@@ -775,7 +790,7 @@ def main() -> None:
     for name in (".tmux.conf", ".tmux.conf.local", "LICENSE.MIT", "LICENSE.WTFPLv2", "UPSTREAM.md"):
         assert (tmux_vendor / name).is_file(), f"missing vendored Oh my tmux! file: {name}"
     tmux_local = (ROOT / ".harness" / "config" / "tmux.conf.local").read_text(encoding="utf-8")
-    assert "set -g history-limit 100000" in tmux_local and "set -g mouse on" in tmux_local, "Awoki tmux local defaults drifted"
+    assert "set -g history-limit 100000" in tmux_local and "set -g mouse off" in tmux_local and "set -s set-clipboard external" in tmux_local, "Awoki tmux local defaults drifted"
     assert "/opt/oh-my-tmux/.tmux.conf" in dockerfile, "OpenCode image must install the vendored tmux main config"
     assert "ln -s /opt/oh-my-tmux/.tmux.conf /home/op/.tmux.conf" in dockerfile, "tmux main config must remain immutable and linked"
     assert "/awoki/.harness/bin/tmux-check" in dockerfile and "/awoki/.harness/bin/tmux-check" in ssh_entrypoint, "tmux config must be smoke-tested at build and startup"

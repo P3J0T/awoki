@@ -9,3 +9,4 @@ cd "$ROOT"
 echo
 echo "Awoki base layout is initialized."
 echo "Next: ./run-opencode.sh"
+echo "Guided first install: ./install-awoki.sh"

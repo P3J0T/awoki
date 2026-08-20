@@ -76,6 +76,37 @@ if [[ ! -f "$INIT_MARKER" ]]; then
   echo "  ./init-awoki.sh" >&2
   exit 2
 fi
+if [[ -L "$INIT_MARKER" ]]; then
+  echo "[awoki] layout marker must not be a symlink: $INIT_MARKER" >&2
+  exit 2
+fi
+read_runtime_instance_id() {
+  python3 - "$INIT_MARKER" <<'PY_RUNTIME_ID'
+import json
+import re
+import sys
+from pathlib import Path
+
+try:
+    value = str(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("runtime_instance_id", ""))
+except Exception as exc:
+    raise SystemExit(f"[awoki] invalid layout marker: {exc}")
+if value and not re.fullmatch(r"[0-9a-f]{32}", value):
+    raise SystemExit("[awoki] layout marker contains an invalid runtime_instance_id")
+print(value)
+PY_RUNTIME_ID
+}
+AWOKI_RUNTIME_INSTANCE_ID="$(read_runtime_instance_id)"
+if [[ -z "$AWOKI_RUNTIME_INSTANCE_ID" ]]; then
+  echo "[awoki] upgrading legacy layout marker with a runtime-instance identity." >&2
+  "$ROOT/.harness/bin/init-layout" >/dev/null
+  AWOKI_RUNTIME_INSTANCE_ID="$(read_runtime_instance_id)"
+fi
+[[ "$AWOKI_RUNTIME_INSTANCE_ID" =~ ^[0-9a-f]{32}$ ]] || {
+  echo "[awoki] failed to initialize runtime-instance identity; rerun ./init-awoki.sh" >&2
+  exit 2
+}
+export AWOKI_RUNTIME_INSTANCE_ID
 
 for required in "$ROOT/workspace" "$ROOT/workspace/projects" "$ROOT/.harness/index" "$ROOT/.harness/artifacts" "$ROOT/.awoki-global" "$ROOT/data/qdrant" "$ROOT/data/qdrant/collections"; do
   if [[ ! -d "$required" ]]; then
@@ -100,54 +131,34 @@ unset AWOKI_OPENCODE_WEB_PASSWORD WEB_PASSWORD_OVERRIDE
 AWOKI_SSH_AUTHORIZED_KEY="$("$ROOT/.harness/bin/opencode-ssh-public-key")"
 export AWOKI_SSH_AUTHORIZED_KEY
 
+# A checkout can be deleted/recreated at the same macOS pathname while Docker
+# Desktop still holds bind mounts to the old directory object. Reconcile those
+# clearly stale same-path containers before any bind-mount probe. Different-path
+# project collisions fail closed and are never removed automatically.
+"$ROOT/.harness/bin/reconcile-opencode-runtime" "$COMPOSE_FILE"
+
 # Qdrant uses a host bind for durable storage. Materialize and write-probe the
 # collections parent from Docker's own mount view before starting the service so
 # filesystem/share problems fail here instead of after a long vector build.
 "$ROOT/.harness/bin/prepare-qdrant-storage" "$COMPOSE_FILE"
 
-port_is_bindable() {
-  local port="$1"
-  python3 - "$port" <<'PY' >/dev/null 2>&1
-import socket
-import sys
-
-port = int(sys.argv[1])
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-try:
-    s.bind(("127.0.0.1", port))
-finally:
-    s.close()
-PY
-}
-
-port_owners() {
-  local port="$1"
-  docker ps --format '{{.ID}}\t{{.Names}}\t{{.Ports}}' \
-    | grep -E "(127\\.0\\.0\\.1|0\\.0\\.0\\.0|::|\\[::\\]):${port}->|:${port}->" || true
-}
-
 check_published_port() {
-  local label="$1" port="$2"
-  local owners
-  owners="$(port_owners "$port")"
-  if port_is_bindable "$port"; then
-    return 0
-  fi
-  if [[ -n "$current_container_id" ]] && printf '%s\n' "$owners" | grep -q "^${current_container_id:0:12}"; then
-    return 0
-  fi
-  echo "[awoki] ${label} port 127.0.0.1:${port} is already in use." >&2
-  if [[ -n "$owners" ]]; then
-    echo "Docker containers publishing this port:" >&2
-    printf '%s\n' "$owners" >&2
-  fi
-  exit 3
+  local label="$1" port="$2" service="$3" disposition
+  disposition="$(
+    "$ROOT/.harness/bin/reconcile-opencode-port-owner" \
+      "$COMPOSE_FILE" "$port" "$label" "$service"
+  )"
+  case "$disposition" in
+    free|recovered|current) return 0 ;;
+    *)
+      echo "[awoki] unexpected ${label} port-owner disposition: $disposition" >&2
+      exit 3
+      ;;
+  esac
 }
 
-current_container_id="$(docker compose -f "$COMPOSE_FILE" ps -q awoki-opencode-ssh 2>/dev/null || true)"
-check_published_port "SSH" "$SSH_PORT"
-check_published_port "OpenCode Web" "$WEB_PORT"
+check_published_port "SSH" "$SSH_PORT" awoki-opencode-ssh
+check_published_port "OpenCode Web" "$WEB_PORT" awoki-opencode-ssh
 
 # Start Qdrant alone first. The actual long-lived service container, not merely
 # a disposable Compose probe, owns the storage contract.
@@ -235,62 +246,9 @@ wait_for_web() {
 
 wait_for_web
 
-verify_ssh_auth() {
-  if ! command -v ssh >/dev/null 2>&1; then
-    return 0
-  fi
-
-  local known_hosts="$SSH_DIR/known_hosts"
-  touch "$known_hosts"
-  chmod 600 "$known_hosts" 2>/dev/null || true
-
-  if ssh \
-    -i "$SSH_DIR/id_ed25519" \
-    -o IdentitiesOnly=yes \
-    -o BatchMode=yes \
-    -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile="$known_hosts" \
-    -p "$SSH_PORT" \
-    op@127.0.0.1 true >/dev/null 2>&1; then
-    return 0
-  fi
-
-  echo "[awoki] SSH port is open, but public-key authentication failed." >&2
-  echo >&2
-  echo "Expected local public key fingerprint:" >&2
-  ssh-keygen -lf "$SSH_DIR/id_ed25519.pub" >&2 || true
-  echo >&2
-  echo "Container SSH diagnostics:" >&2
-  docker exec "$CONTAINER_NAME" sh -lc '
-    set +e
-    echo "--- installed authorized_keys ---"
-    ls -ld /home/op /home/op/.ssh 2>/dev/null || true
-    ls -l /home/op/.ssh/authorized_keys 2>/dev/null || true
-    ssh-keygen -lf /home/op/.ssh/authorized_keys 2>/dev/null || cat /home/op/.ssh/authorized_keys 2>/dev/null || true
-    echo "--- sshd effective config ---"
-    sshd -T 2>/dev/null | grep -E "^(authorizedkeysfile|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|strictmodes|permitrootlogin)" || true
-    echo "--- op account ---"
-    passwd -S op 2>/dev/null || true
-  ' >&2 || true
-  echo >&2
-  echo "Recent SSH container logs:" >&2
-  docker logs "$CONTAINER_NAME" --tail=80 >&2 || true
-  echo >&2
-  echo "Manual SSH may still work. Try:" >&2
-  echo "  ssh -i $SSH_DIR/id_ed25519 -o IdentitiesOnly=yes -p $SSH_PORT op@127.0.0.1" >&2
-  echo >&2
-  echo "If manual SSH fails too, rebuild the image, then rerun:" >&2
-  echo "  docker compose -f docker-compose.opencode.yml build --no-cache awoki-opencode-ssh" >&2
-  echo "  ./run-opencode.sh" >&2
-  return 1
-}
-
-if ! verify_ssh_auth; then
-  echo >&2
-  echo "[awoki] WARNING: automatic SSH auth probe failed, but SSH port is open." >&2
-  echo "[awoki] This can be a false negative on some macOS/OpenSSH setups." >&2
-  echo "[awoki] Printing the manual SSH command anyway." >&2
-fi
+echo
+echo "[awoki] verifying host SSH key material, container authorization, and real public-key login..."
+"$ROOT/.harness/bin/verify-opencode-ssh-client"
 
 if (( WEB_ENABLED )); then
   echo "OpenCode Web: http://127.0.0.1:${WEB_PORT}"
@@ -300,7 +258,7 @@ if (( WEB_ENABLED )); then
   echo
 fi
 echo "SSH into OpenCode container with:"
-echo "ssh -i $SSH_DIR/id_ed25519 -o IdentitiesOnly=yes -p $SSH_PORT op@127.0.0.1"
+echo "ssh -i $SSH_DIR/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new -p $SSH_PORT op@127.0.0.1"
 echo
 echo "Then run the Awoki client wrapper (attaches to the shared Web backend when enabled):"
 echo "cd /awoki && awoki-opencode"
