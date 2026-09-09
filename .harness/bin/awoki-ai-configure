@@ -1,0 +1,483 @@
+#!/usr/bin/env python3
+"""Compile one AI endpoint profile into Awoki and OpenCode configuration."""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import tempfile
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+
+ENV_KEY_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+class ConfigurationError(ValueError):
+    pass
+
+
+def _decode_env_value(raw: str) -> str:
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] == "'":
+        return value[1:-1].replace("\\'", "'")
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value[1:-1]
+    return value
+
+
+def _read_env(path: Path) -> tuple[str, dict[str, str]]:
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        match = ENV_KEY_RE.match(line)
+        if match:
+            values[match.group(1)] = _decode_env_value(match.group(2))
+    return text, values
+
+
+def _encode_env_value(value: str) -> str:
+    if "\n" in value or "\r" in value:
+        raise ConfigurationError("environment values must be single-line")
+    if re.fullmatch(r"[A-Za-z0-9_./:@%+=,-]*", value):
+        return value
+    return "'" + value.replace("'", "\\'") + "'"
+
+
+def _update_env_text(text: str, updates: dict[str, str]) -> str:
+    pending = dict(updates)
+    result: list[str] = []
+    for line in text.splitlines():
+        match = ENV_KEY_RE.match(line)
+        key = match.group(1) if match else ""
+        if key not in updates:
+            result.append(line)
+            continue
+        if key in pending:
+            result.append(f"{key}={_encode_env_value(pending.pop(key))}")
+        # Drop duplicate assignments for managed keys.
+    if pending:
+        if result and result[-1]:
+            result.append("")
+        result.append("# Managed by make ai-configure")
+        for key, value in pending.items():
+            result.append(f"{key}={_encode_env_value(value)}")
+    return "\n".join(result) + "\n"
+
+
+def _strip_jsonc(text: str) -> str:
+    without_comments: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if in_string:
+            without_comments.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            without_comments.append(char)
+            index += 1
+            continue
+        if char == "/" and following == "/":
+            index += 2
+            while index < len(text) and text[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and following == "*":
+            index += 2
+            while index + 1 < len(text) and not (
+                text[index] == "*" and text[index + 1] == "/"
+            ):
+                index += 1
+            if index + 1 >= len(text):
+                raise ConfigurationError("unterminated block comment in OpenCode JSONC")
+            index += 2
+            continue
+        without_comments.append(char)
+        index += 1
+
+    stripped = "".join(without_comments)
+    clean: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(stripped):
+        char = stripped[index]
+        if in_string:
+            clean.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            clean.append(char)
+            index += 1
+            continue
+        if char == ",":
+            following = index + 1
+            while following < len(stripped) and stripped[following].isspace():
+                following += 1
+            if following < len(stripped) and stripped[following] in "}]":
+                index += 1
+                continue
+        clean.append(char)
+        index += 1
+    return "".join(clean)
+
+
+def _read_jsonc(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"$schema": "https://opencode.ai/config.json"}
+    try:
+        value = json.loads(_strip_jsonc(path.read_text(encoding="utf-8")))
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(f"invalid existing OpenCode JSONC: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ConfigurationError("existing OpenCode configuration must be an object")
+    return value
+
+
+def _validated_url(value: str, label: str) -> str:
+    value = value.strip().rstrip("/")
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise ConfigurationError(f"{label} is not a valid URL") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ConfigurationError(f"{label} must be an http or https URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ConfigurationError(
+            f"{label} must not contain credentials, query parameters, or a fragment"
+        )
+    return value
+
+
+def _default_rerank_url(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    path = path.rstrip("/") + "/rerank"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _normalise_key(value: str) -> tuple[str, bool]:
+    key = value.strip()
+    removed_prefix = False
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+        removed_prefix = True
+    if not key:
+        raise ConfigurationError("API key is required")
+    if any(char.isspace() for char in key):
+        raise ConfigurationError("API key must not contain whitespace")
+    return key, removed_prefix
+
+
+def _choose(cli: str | None, environment: str, current: str, default: str) -> str:
+    if cli is not None:
+        return cli
+    return os.environ.get(environment) or current or default
+
+
+def _prompt(label: str, current: str) -> str:
+    suffix = f" [{current}]" if current else ""
+    answer = input(f"{label}{suffix}: ").strip()
+    return answer or current
+
+
+def _atomic_write(path: Path, text: str, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.is_symlink():
+        raise ConfigurationError(f"refusing symlink configuration path: {path}")
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _positive_int(value: str, label: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ConfigurationError(f"{label} must be an integer") from exc
+    if parsed <= 0:
+        raise ConfigurationError(f"{label} must be greater than zero")
+    return parsed
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Configure one OpenAI-compatible endpoint for Awoki embeddings, "
+            "reranking, and an OpenCode chat model without hand-editing JSONC."
+        )
+    )
+    parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument("--api-key-stdin", action="store_true")
+    parser.add_argument("--base-url")
+    parser.add_argument("--embedding-model")
+    parser.add_argument("--embedding-deployment")
+    parser.add_argument("--vector-size")
+    parser.add_argument("--rerank-url")
+    parser.add_argument("--rerank-model")
+    parser.add_argument("--no-reranker", action="store_true")
+    parser.add_argument("--chat-model")
+    parser.add_argument("--provider-id")
+    parser.add_argument("--provider-name")
+    parser.add_argument("--model-name")
+    parser.add_argument("--context")
+    parser.add_argument("--output")
+    args = parser.parse_args()
+
+    root = Path(os.environ.get("AWOKI_ROOT") or Path(__file__).resolve().parents[2]).resolve()
+    env_path = Path(os.environ.get("AWOKI_ENV_FILE") or root / ".env")
+    config_path = Path(
+        os.environ.get("AWOKI_OPENCODE_USER_CONFIG")
+        or root / ".opencode-state" / "config" / "opencode.jsonc"
+    )
+    if env_path.exists() and (not env_path.is_file() or env_path.is_symlink()):
+        raise ConfigurationError(f"refusing unsafe .env path: {env_path}")
+
+    env_text, current = _read_env(env_path)
+    existing_config = _read_jsonc(config_path)
+    existing_provider_id = current.get("AWOKI_OPENCODE_PROVIDER_ID", "")
+
+    base_url = _choose(
+        args.base_url,
+        "AWOKI_AI_BASE_URL",
+        current.get("AWOKI_EMBEDDING_BASE_URL", ""),
+        "",
+    )
+    embedding_model = _choose(
+        args.embedding_model,
+        "AWOKI_AI_EMBEDDING_MODEL",
+        current.get("AWOKI_EMBEDDING_MODEL", ""),
+        "text-embeddings-inference",
+    )
+    embedding_deployment = _choose(
+        args.embedding_deployment,
+        "AWOKI_AI_EMBEDDING_DEPLOYMENT",
+        current.get("AWOKI_EMBEDDING_DEPLOYMENT_ID", ""),
+        embedding_model,
+    )
+    vector_size = _choose(
+        args.vector_size,
+        "AWOKI_AI_VECTOR_SIZE",
+        current.get("AWOKI_VECTOR_SIZE", ""),
+        "768",
+    )
+    rerank_url = _choose(
+        args.rerank_url,
+        "AWOKI_AI_RERANK_URL",
+        current.get("AWOKI_RERANK_URL", ""),
+        "",
+    )
+    rerank_model = _choose(
+        args.rerank_model,
+        "AWOKI_AI_RERANK_MODEL",
+        current.get("AWOKI_RERANK_MODEL", ""),
+        "",
+    )
+    chat_model = _choose(
+        args.chat_model,
+        "AWOKI_AI_CHAT_MODEL",
+        current.get("AWOKI_OPENCODE_MODEL", ""),
+        "",
+    )
+    provider_id = _choose(
+        args.provider_id,
+        "AWOKI_AI_PROVIDER_ID",
+        existing_provider_id,
+        "custom-openai",
+    )
+    provider_name = _choose(
+        args.provider_name,
+        "AWOKI_AI_PROVIDER_NAME",
+        current.get("AWOKI_OPENCODE_PROVIDER_NAME", ""),
+        "Custom OpenAI",
+    )
+    model_name = _choose(
+        args.model_name,
+        "AWOKI_AI_MODEL_NAME",
+        current.get("AWOKI_OPENCODE_MODEL_NAME", ""),
+        chat_model,
+    )
+    context = _choose(
+        args.context,
+        "AWOKI_AI_CONTEXT",
+        current.get("AWOKI_OPENCODE_CONTEXT", ""),
+        "131072",
+    )
+    output = _choose(
+        args.output,
+        "AWOKI_AI_OUTPUT",
+        current.get("AWOKI_OPENCODE_OUTPUT", ""),
+        "8192",
+    )
+
+    if args.api_key_stdin:
+        key_input = sys.stdin.readline().rstrip("\r\n")
+    else:
+        key_input = os.environ.get("AWOKI_AI_API_KEY") or current.get(
+            "AWOKI_EMBEDDING_API_KEY", ""
+        )
+
+    interactive = not args.non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
+    if interactive:
+        base_url = _prompt("OpenAI-compatible base URL", base_url)
+        embedding_model = _prompt("Embedding model", embedding_model)
+        embedding_deployment = _prompt("Embedding deployment identity", embedding_deployment)
+        vector_size = _prompt("Embedding vector size", vector_size)
+        rerank_model = "" if args.no_reranker else _prompt("Reranker model", rerank_model)
+        proposed_rerank = rerank_url or (_default_rerank_url(base_url) if base_url else "")
+        rerank_url = "" if args.no_reranker else _prompt("Reranker URL", proposed_rerank)
+        chat_model = _prompt("OpenCode chat model", chat_model)
+        provider_id = _prompt("OpenCode provider id", provider_id)
+        provider_name = _prompt("OpenCode provider name", provider_name)
+        model_name = _prompt("OpenCode model display name", model_name or chat_model)
+        context = _prompt("Chat context limit", context)
+        output = _prompt("Chat output limit", output)
+        entered_key = getpass.getpass(
+            "Shared API key [Enter keeps existing; optional 'Bearer ' is removed]: "
+        )
+        if entered_key:
+            key_input = entered_key
+
+    base_url = _validated_url(base_url, "base URL")
+    if not rerank_url and not args.no_reranker:
+        rerank_url = _default_rerank_url(base_url)
+    if rerank_url:
+        rerank_url = _validated_url(rerank_url, "reranker URL")
+    key, removed_prefix = _normalise_key(key_input)
+    vector_size_int = _positive_int(vector_size, "vector size")
+    context_int = _positive_int(context, "context limit")
+    output_int = _positive_int(output, "output limit")
+
+    for label, value in (
+        ("embedding model", embedding_model),
+        ("embedding deployment", embedding_deployment),
+        ("chat model", chat_model),
+    ):
+        if not value.strip():
+            raise ConfigurationError(f"{label} is required")
+    if not args.no_reranker and not rerank_model.strip():
+        raise ConfigurationError("reranker model is required unless --no-reranker is used")
+    if not IDENTIFIER_RE.fullmatch(provider_id):
+        raise ConfigurationError(
+            "provider id must use letters, digits, dot, underscore, or dash"
+        )
+
+    updates = {
+        "AWOKI_EMBEDDING_PROVIDER": "openai",
+        "AWOKI_EMBEDDING_MODEL": embedding_model.strip(),
+        "AWOKI_EMBEDDING_DEPLOYMENT_ID": embedding_deployment.strip(),
+        "AWOKI_EMBEDDING_BASE_URL": base_url,
+        "AWOKI_EMBEDDING_API_KEY": key,
+        "AWOKI_VECTOR_SIZE": str(vector_size_int),
+        "AWOKI_RERANK_ENABLED": "0" if args.no_reranker else "1",
+        "AWOKI_RERANK_PROVIDER": "http",
+        "AWOKI_RERANK_URL": "" if args.no_reranker else rerank_url,
+        "AWOKI_RERANK_MODEL": "" if args.no_reranker else rerank_model.strip(),
+        # Keep one copy of the shared secret. Runtime snapshotting resolves this
+        # indirection before invoking the reranker.
+        "AWOKI_RERANK_API_KEY": "",
+        "AWOKI_RERANK_API_KEY_ENV": "AWOKI_EMBEDDING_API_KEY",
+        "AWOKI_OPENCODE_PROVIDER_ID": provider_id,
+        "AWOKI_OPENCODE_PROVIDER_NAME": provider_name,
+        "AWOKI_OPENCODE_MODEL": chat_model.strip(),
+        "AWOKI_OPENCODE_MODEL_NAME": (model_name or chat_model).strip(),
+        "AWOKI_OPENCODE_CONTEXT": str(context_int),
+        "AWOKI_OPENCODE_OUTPUT": str(output_int),
+    }
+
+    providers = existing_config.setdefault("provider", {})
+    if not isinstance(providers, dict):
+        raise ConfigurationError("OpenCode provider configuration must be an object")
+    if existing_provider_id and existing_provider_id != provider_id:
+        providers.pop(existing_provider_id, None)
+    providers[provider_id] = {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": provider_name,
+        "options": {
+            "baseURL": base_url,
+            "apiKey": "{env:AWOKI_EMBEDDING_API_KEY}",
+            "headers": {
+                "Authorization": "Bearer {env:AWOKI_EMBEDDING_API_KEY}",
+                "User-Agent": "awoki-runtime",
+            },
+            "timeout": 600000,
+            "chunkTimeout": 60000,
+        },
+        "models": {
+            chat_model.strip(): {
+                "name": (model_name or chat_model).strip(),
+                "limit": {"context": context_int, "output": output_int},
+            }
+        },
+    }
+    config_text = json.dumps(existing_config, indent=2, ensure_ascii=False) + "\n"
+    # Validate both generated documents before either replaces user state.
+    json.loads(config_text)
+    env_output = _update_env_text(env_text, updates)
+
+    env_mode = stat.S_IMODE(env_path.stat().st_mode) if env_path.exists() else 0o600
+    config_mode = stat.S_IMODE(config_path.stat().st_mode) if config_path.exists() else 0o600
+    _atomic_write(env_path, env_output, min(env_mode, 0o600))
+    _atomic_write(config_path, config_text, min(config_mode, 0o600))
+
+    print(f"awoki_ai_config=ok env={env_path} opencode={config_path}")
+    print(f"base_url={base_url}")
+    print(f"embedding_model={embedding_model.strip()} vector_size={vector_size_int}")
+    if args.no_reranker:
+        print("reranker=disabled")
+    else:
+        print(f"reranker_model={rerank_model.strip()} url={rerank_url}")
+    print(f"chat_model={provider_id}/{chat_model.strip()}")
+    print("authentication=Bearer <AWOKI_EMBEDDING_API_KEY> (one stored raw key)")
+    if removed_prefix:
+        print("normalization=removed supplied Bearer prefix before storing the key")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ConfigurationError as exc:
+        print(f"[awoki] AI configuration error: {exc}", file=sys.stderr)
+        raise SystemExit(2)

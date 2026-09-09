@@ -145,11 +145,20 @@ class CoreTests(unittest.TestCase):
         clients = []
 
         class FakeOpenAI:
-            def __init__(self, *, api_key, base_url=None, timeout=None, max_retries=None):
+            def __init__(
+                self,
+                *,
+                api_key,
+                base_url=None,
+                timeout=None,
+                max_retries=None,
+                default_headers=None,
+            ):
                 self.api_key = api_key
                 self.base_url = base_url
                 self.timeout = timeout
                 self.max_retries = max_retries
+                self.default_headers = default_headers
                 self.embeddings = Embeddings()
                 clients.append(self)
 
@@ -174,6 +183,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(clients[0].base_url, "http://embedding.example.invalid:8000/v1")
         self.assertEqual(clients[0].timeout, 30.0)
         self.assertEqual(clients[0].max_retries, 1)
+        self.assertEqual(clients[0].default_headers, {"User-Agent": "awoki-runtime"})
         self.assertEqual(vectors, [[0.6, 0.8]])
 
     def test_query_embedding_uses_short_no_retry_budget(self):

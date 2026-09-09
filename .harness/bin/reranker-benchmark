@@ -62,6 +62,13 @@ def _bounded_error(exc: BaseException) -> dict[str, str]:
     return {"type": type_name, "message": message}
 
 
+def _reranker_headers(api_key: str) -> dict[str, str]:
+    headers = {"Content-Type": "application/json", "User-Agent": "awoki-runtime"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float) -> Any:
     parts = urlsplit(url)
@@ -162,9 +169,7 @@ def main() -> int:
             "Mutator copies identity fields into upstream request headers.",
         ]
         documents = [base_docs[i % len(base_docs)] + f" Candidate {i}." for i in range(args.documents)]
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        headers = _reranker_headers(api_key)
         if provider == "tei":
             payload: dict[str, Any] = {"query": query, "texts": documents, "raw_scores": False}
         else:

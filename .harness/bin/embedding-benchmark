@@ -79,6 +79,14 @@ def _error_payload(stage: str, exc: BaseException, *, elapsed: float | None = No
     return result
 
 
+def _embedding_headers(api_key: str) -> dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "User-Agent": "awoki-runtime",
+    }
+
+
 
 def _embedding_request(*, base_url: str, api_key: str, model: str, inputs: list[str], timeout: float, dimensions: int | None = None) -> list[list[float]]:
     parts = urlsplit(base_url)
@@ -94,10 +102,7 @@ def _embedding_request(*, base_url: str, api_key: str, model: str, inputs: list[
     if dimensions is not None:
         request["dimensions"] = dimensions
     payload = json.dumps(request, separators=(",", ":")).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
+    headers = _embedding_headers(api_key)
     try:
         connection.request("POST", path, body=payload, headers=headers)
         response = connection.getresponse()

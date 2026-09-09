@@ -361,7 +361,32 @@ Safe mode is operator-selected. Awoki does not pretend that a version is “know
 
 ## Configure retrieval
 
-Copy `.env.example` and set only the services you intend to use.
+For one OpenAI-compatible service that supplies chat, embeddings, and reranking,
+use the guided compiler instead of editing `.env` and JSONC independently:
+
+```bash
+make ai-configure
+```
+
+It asks once for the shared base URL and raw API key, the embedding model/vector
+size, reranker model/URL, and OpenCode chat model. It then updates `.env`,
+generates `.opencode-state/config/opencode.jsonc`, validates the result, and
+reloads a running OpenCode service. If a pasted key begins with `Bearer `, the
+compiler removes that prefix before storage; generated requests add exactly one
+`Authorization: Bearer ...` header. The reranker reuses the embedding key through
+`AWOKI_RERANK_API_KEY_ENV`, so the secret is stored only once.
+
+For automation, pass non-secret values through `AWOKI_AI_BASE_URL`,
+`AWOKI_AI_EMBEDDING_MODEL`, `AWOKI_AI_EMBEDDING_DEPLOYMENT`,
+`AWOKI_AI_VECTOR_SIZE`, `AWOKI_AI_RERANK_URL`, `AWOKI_AI_RERANK_MODEL`,
+`AWOKI_AI_CHAT_MODEL`, `AWOKI_AI_PROVIDER_ID`, and related `AWOKI_AI_*`
+metadata. Pass the secret through `AWOKI_AI_API_KEY` in the process environment
+or use `AI_CONFIG_ARGS="--non-interactive --api-key-stdin"`; do not put it in a
+Make argument. `make ai-config-compile` performs the same compilation without a
+runtime reload.
+
+The lower-level manual route remains available: copy `.env.example` and set only
+the services you intend to use.
 
 For semantic retrieval, the key settings are:
 

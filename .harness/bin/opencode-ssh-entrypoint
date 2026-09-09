@@ -190,6 +190,21 @@ runuser -u op -- env -i \
     set -euo pipefail
     password_file="${AWOKI_OPENCODE_WEB_RUNTIME_PASSWORD_FILE:?}"
     [[ -f "$password_file" && ! -L "$password_file" ]] || exit 2
+    runtime_env_file=/run/awoki/runtime.env
+    [[ -r "$runtime_env_file" && -f "$runtime_env_file" && ! -L "$runtime_env_file" ]] || exit 2
+    # User provider configs may reference the same raw API key used by Awoki
+    # retrieval. Import the root-generated snapshot, then discard every other
+    # exported runtime setting before starting OpenCode Web. The provider adds
+    # the Authorization scheme; the stored value must not include "Bearer ".
+    source "$runtime_env_file"
+    while IFS="=" read -r declaration _; do
+      name="${declaration#export }"
+      [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+      case "$name" in
+        AWOKI_EMBEDDING_API_KEY|AWOKI_OPENCODE_WEB_PORT|AWOKI_OPENCODE_WEB_USERNAME) ;;
+        *) unset "$name" ;;
+      esac
+    done < "$runtime_env_file"
     OPENCODE_SERVER_PASSWORD="$(cat "$password_file")"
     export OPENCODE_SERVER_PASSWORD
     export OPENCODE_SERVER_USERNAME="$AWOKI_OPENCODE_WEB_USERNAME"

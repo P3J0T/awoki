@@ -383,6 +383,16 @@ After changing retrieval/Qdrant/reranker configuration, recreate the OpenCode SS
 runtime and start a fresh OpenCode process. Do not manually source
 /run/awoki/runtime.env.
 
+Preferred shared-endpoint configuration
+
+  make ai-configure
+
+This guided command collects one raw API key plus the chat, embedding, and
+reranker model identities; generates both .env and the ignored OpenCode user
+JSONC; validates them; and reloads the running service. It automatically derives
+<base-origin>/rerank from a base URL ending in /v1, unless you provide a different
+reranker URL. Never store the literal "Bearer " prefix in .env.
+
 Useful checks
 
   make doctor

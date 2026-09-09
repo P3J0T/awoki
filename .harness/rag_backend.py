@@ -281,6 +281,7 @@ def _openai_embed_texts(texts: list[str], cfg: EmbeddingConfig, *, is_query: boo
         "api_key": api_key,
         "timeout": timeout,
         "max_retries": max_retries,
+        "default_headers": {"User-Agent": "awoki-runtime"},
     }
     if base_url:
         client_kwargs["base_url"] = base_url
@@ -737,6 +738,7 @@ def probe_retrieval(
                         "api_key": api_key,
                         "timeout": max(0.1, remaining_timeout()),
                         "max_retries": 0,
+                        "default_headers": {"User-Agent": "awoki-runtime"},
                     }
                     if base_url:
                         kwargs["base_url"] = base_url
@@ -1187,7 +1189,7 @@ def _remote_rerank_scores(query: str, documents: list[str], profile: dict[str, A
         import httpx
     except Exception as exc:  # pragma: no cover - dependency is required in normal installs
         raise RuntimeError("httpx is required for AWOKI_RERANK_PROVIDER=http|tei") from exc
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "User-Agent": "awoki-runtime"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     provider = str(profile.get("provider") or "http").lower()
