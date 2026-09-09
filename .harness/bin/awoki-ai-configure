@@ -249,6 +249,11 @@ def main() -> int:
         )
     )
     parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument(
+        "--add-chat-model",
+        action="store_true",
+        help="add or update one model on the currently managed provider",
+    )
     parser.add_argument("--api-key-stdin", action="store_true")
     parser.add_argument("--base-url")
     parser.add_argument("--embedding-model")
@@ -351,7 +356,9 @@ def main() -> int:
         "8192",
     )
 
-    if args.api_key_stdin:
+    if args.add_chat_model:
+        key_input = current.get("AWOKI_EMBEDDING_API_KEY", "")
+    elif args.api_key_stdin:
         key_input = sys.stdin.readline().rstrip("\r\n")
     else:
         key_input = os.environ.get("AWOKI_AI_API_KEY") or current.get(
@@ -360,24 +367,37 @@ def main() -> int:
 
     interactive = not args.non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
     if interactive:
-        base_url = _prompt("OpenAI-compatible base URL", base_url)
-        embedding_model = _prompt("Embedding model", embedding_model)
-        embedding_deployment = _prompt("Embedding deployment identity", embedding_deployment)
-        vector_size = _prompt("Embedding vector size", vector_size)
-        rerank_model = "" if args.no_reranker else _prompt("Reranker model", rerank_model)
-        proposed_rerank = rerank_url or (_default_rerank_url(base_url) if base_url else "")
-        rerank_url = "" if args.no_reranker else _prompt("Reranker URL", proposed_rerank)
-        chat_model = _prompt("OpenCode chat model", chat_model)
-        provider_id = _prompt("OpenCode provider id", provider_id)
-        provider_name = _prompt("OpenCode provider name", provider_name)
-        model_name = _prompt("OpenCode model display name", model_name or chat_model)
-        context = _prompt("Chat context limit", context)
-        output = _prompt("Chat output limit", output)
-        entered_key = getpass.getpass(
-            "Shared API key [Enter keeps existing; optional 'Bearer ' is removed]: "
+        if args.add_chat_model:
+            chat_model = _prompt("Additional chat model ID", "")
+            model_name = _prompt("Model display name", chat_model)
+            context = _prompt("Context limit in tokens (positive integer)", context)
+            output = _prompt("Output limit in tokens (positive integer)", output)
+        else:
+            base_url = _prompt("OpenAI-compatible base URL (http(s), usually ending in /v1)", base_url)
+            embedding_model = _prompt("Embedding model ID", embedding_model)
+            embedding_deployment = _prompt("Embedding deployment ID", embedding_deployment)
+            vector_size = _prompt("Embedding vector size (positive integer)", vector_size)
+            rerank_model = "" if args.no_reranker else _prompt("Reranker model ID", rerank_model)
+            proposed_rerank = rerank_url or (_default_rerank_url(base_url) if base_url else "")
+            rerank_url = "" if args.no_reranker else _prompt("Reranker URL (http(s))", proposed_rerank)
+            chat_model = _prompt("OpenCode chat model ID", chat_model)
+            provider_id = _prompt("OpenCode provider ID (letters, digits, dot, _ or -)", provider_id)
+            provider_name = _prompt("OpenCode provider display name", provider_name)
+            model_name = _prompt("OpenCode model display name", model_name or chat_model)
+            context = _prompt("Chat context limit in tokens (positive integer)", context)
+            output = _prompt("Chat output limit in tokens (positive integer)", output)
+            entered_key = getpass.getpass(
+                "Shared API key [Enter keeps existing; optional 'Bearer ' is removed]: "
+            )
+            if entered_key:
+                key_input = entered_key
+
+    if args.add_chat_model and args.non_interactive and not (
+        args.chat_model or os.environ.get("AWOKI_AI_CHAT_MODEL")
+    ):
+        raise ConfigurationError(
+            "non-interactive --add-chat-model requires --chat-model or AWOKI_AI_CHAT_MODEL"
         )
-        if entered_key:
-            key_input = entered_key
 
     base_url = _validated_url(base_url, "base URL")
     if not rerank_url and not args.no_reranker:
@@ -431,26 +451,52 @@ def main() -> int:
         raise ConfigurationError("OpenCode provider configuration must be an object")
     if existing_provider_id and existing_provider_id != provider_id:
         providers.pop(existing_provider_id, None)
-    providers[provider_id] = {
+    existing_provider = providers.get(provider_id, {})
+    if not isinstance(existing_provider, dict):
+        raise ConfigurationError(f"OpenCode provider {provider_id!r} must be an object")
+    provider_config = dict(existing_provider)
+    options = provider_config.get("options", {})
+    if not isinstance(options, dict):
+        raise ConfigurationError(f"OpenCode provider {provider_id!r} options must be an object")
+    options = dict(options)
+    headers = options.get("headers", {})
+    if not isinstance(headers, dict):
+        raise ConfigurationError(f"OpenCode provider {provider_id!r} headers must be an object")
+    headers = dict(headers)
+    headers.update({
+        "Authorization": "Bearer {env:AWOKI_EMBEDDING_API_KEY}",
+        "User-Agent": "awoki-runtime",
+    })
+    options.update({
+        "baseURL": base_url,
+        "apiKey": "{env:AWOKI_EMBEDDING_API_KEY}",
+        "headers": headers,
+        "timeout": 600000,
+        "chunkTimeout": 60000,
+    })
+    models = provider_config.get("models", {})
+    if not isinstance(models, dict):
+        raise ConfigurationError(f"OpenCode provider {provider_id!r} models must be an object")
+    models = dict(models)
+    model_id = chat_model.strip()
+    model_config = models.get(model_id, {})
+    if not isinstance(model_config, dict):
+        raise ConfigurationError(f"OpenCode model {model_id!r} must be an object")
+    model_config = dict(model_config)
+    limits = model_config.get("limit", {})
+    if not isinstance(limits, dict):
+        raise ConfigurationError(f"OpenCode model {model_id!r} limit must be an object")
+    limits = dict(limits)
+    limits.update({"context": context_int, "output": output_int})
+    model_config.update({"name": (model_name or chat_model).strip(), "limit": limits})
+    models[model_id] = model_config
+    provider_config.update({
         "npm": "@ai-sdk/openai-compatible",
         "name": provider_name,
-        "options": {
-            "baseURL": base_url,
-            "apiKey": "{env:AWOKI_EMBEDDING_API_KEY}",
-            "headers": {
-                "Authorization": "Bearer {env:AWOKI_EMBEDDING_API_KEY}",
-                "User-Agent": "awoki-runtime",
-            },
-            "timeout": 600000,
-            "chunkTimeout": 60000,
-        },
-        "models": {
-            chat_model.strip(): {
-                "name": (model_name or chat_model).strip(),
-                "limit": {"context": context_int, "output": output_int},
-            }
-        },
-    }
+        "options": options,
+        "models": models,
+    })
+    providers[provider_id] = provider_config
     config_text = json.dumps(existing_config, indent=2, ensure_ascii=False) + "\n"
     # Validate both generated documents before either replaces user state.
     json.loads(config_text)

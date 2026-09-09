@@ -387,6 +387,20 @@ configuration files, validates them, and reloads or recreates the running servic
 as required. The key is never passed as a command argument. Chat, embeddings, and
 reranking all begin using the new value after the reload.
 
+The generated provider uses OpenCode's standard `provider.<id>.models` map. Add
+or update another chat model on the same endpoint without re-entering URLs or the
+API key:
+
+```bash
+make ai-model-add
+```
+
+The short prompt asks only for model ID, display name, context-token limit, and
+output-token limit. Run it repeatedly for additional models. Existing models,
+custom model fields, custom provider headers/options, and unrelated providers are
+preserved. `make ai-key-update` rotates the shared credential without removing
+any of these models.
+
 For automation, pass non-secret values through `AWOKI_AI_BASE_URL`,
 `AWOKI_AI_EMBEDDING_MODEL`, `AWOKI_AI_EMBEDDING_DEPLOYMENT`,
 `AWOKI_AI_VECTOR_SIZE`, `AWOKI_AI_RERANK_URL`, `AWOKI_AI_RERANK_MODEL`,

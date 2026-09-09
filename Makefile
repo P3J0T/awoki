@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: doctor continuity-doctor dependencies-check dev-preflight install-interactive init layout require-init maintenance-check validate validate-runtime code-search-eval code-search-eval-runtime install install-opencode-ssh opencode-ssh opencode-recreate docker-build docker-up docker-down docker-smoke opencode-ssh-build opencode-ssh-up opencode-ssh-down opencode-ssh-shell opencode-ssh-client-check opencode-web-password ai-config-compile ai-configure ai-key-update opencode-user-config-check opencode-config-reload opencode-auth opencode-runtime-check runtime-config embedding-benchmark reranker-benchmark mcp-local mcp-docker mcp-auto index index-local index-vector index-vector-local burp-status burp-tools burp-validate backup-portable backup-full backup-verify backup-inspect restore test clean package
+.PHONY: doctor continuity-doctor dependencies-check dev-preflight install-interactive init layout require-init maintenance-check validate validate-runtime code-search-eval code-search-eval-runtime install install-opencode-ssh opencode-ssh opencode-recreate docker-build docker-up docker-down docker-smoke opencode-ssh-build opencode-ssh-up opencode-ssh-down opencode-ssh-shell opencode-ssh-client-check opencode-web-password ai-config-compile ai-configure ai-model-add ai-key-update opencode-user-config-check opencode-config-reload opencode-auth opencode-runtime-check runtime-config embedding-benchmark reranker-benchmark mcp-local mcp-docker mcp-auto index index-local index-vector index-vector-local burp-status burp-tools burp-validate backup-portable backup-full backup-verify backup-inspect restore test clean package
 
 BACKUP_DIR ?= ../awoki-backups
 BACKUP ?=
@@ -16,6 +16,7 @@ RERANKER_BENCHMARK_ARGS ?=
 OPENCODE_INSTALL_MODE ?= latest
 OPENCODE_SAFE_VERSION ?=
 AI_CONFIG_ARGS ?=
+AI_MODEL_ARGS ?=
 
 truthy = $(filter 1 true yes on,$(strip $(1)))
 backup_common_flags = $(if $(call truthy,$(BACKUP_INCLUDE_OPENCODE_STATE)),--include-opencode-state,) $(if $(call truthy,$(BACKUP_INCLUDE_SECRETS)),--include-secrets,) $(if $(call truthy,$(BACKUP_ALLOW_LIVE)),--allow-live,) $(if $(call truthy,$(BACKUP_STOP_CONTAINERS)),--stop-containers,)
@@ -169,6 +170,10 @@ ai-config-compile:
 	@.harness/bin/awoki-ai-configure $(AI_CONFIG_ARGS)
 
 ai-configure: ai-config-compile
+	@$(MAKE) opencode-config-reload
+
+ai-model-add:
+	@.harness/bin/awoki-ai-configure --add-chat-model $(AI_MODEL_ARGS)
 	@$(MAKE) opencode-config-reload
 
 ai-key-update:

@@ -401,6 +401,15 @@ The prompt is hidden. It preserves all model, URL, context, and output settings,
 then validates and reloads/recreates the running service automatically. The one
 new raw key is used by chat, embeddings, and reranking.
 
+Add multiple chat models to the same normal OpenCode provider definition:
+
+  make ai-model-add
+
+Repeat it once per model. It asks only for the model ID, display name, context
+limit, and output limit. Existing models and unrelated providers are preserved,
+and the service is reloaded automatically. Key rotation preserves the full model
+list.
+
 Useful checks
 
   make doctor

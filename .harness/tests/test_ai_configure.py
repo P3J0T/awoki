@@ -95,6 +95,37 @@ class AIConfigurationTests(unittest.TestCase):
             self.assertEqual(embedding["_embedding_headers"]("fake-offline-token"), expected)
             self.assertEqual(reranker["_reranker_headers"]("fake-offline-token"), expected)
 
+            add_env = {
+                **os.environ,
+                "AWOKI_ROOT": str(root),
+                "AWOKI_AI_CHAT_MODEL": "chat-model-2",
+                "AWOKI_AI_MODEL_NAME": "Second Chat",
+                "AWOKI_AI_CONTEXT": "131072",
+                "AWOKI_AI_OUTPUT": "4096",
+            }
+            added = subprocess.run(
+                [
+                    sys.executable,
+                    str(CONFIGURATOR),
+                    "--add-chat-model",
+                    "--non-interactive",
+                ],
+                cwd=root,
+                env=add_env,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(added.returncode, 0, added.stderr)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            models = config["provider"]["test-provider"]["models"]
+            self.assertEqual(set(models), {"chat-model", "chat-model-2"})
+            self.assertEqual(models["chat-model"]["limit"]["context"], 210000)
+            self.assertEqual(models["chat-model-2"]["name"], "Second Chat")
+            self.assertEqual(models["chat-model-2"]["limit"]["context"], 131072)
+            self.assertEqual(models["chat-model-2"]["limit"]["output"], 4096)
+
             bin_dir = root / ".harness" / "bin"
             bin_dir.mkdir(parents=True)
             shutil.copy2(CONFIGURATOR, bin_dir / CONFIGURATOR.name)
@@ -131,6 +162,11 @@ class AIConfigurationTests(unittest.TestCase):
             self.assertIn("AWOKI_RERANK_API_KEY=\n", env_text)
             self.assertIn(
                 "AWOKI_RERANK_API_KEY_ENV=AWOKI_EMBEDDING_API_KEY\n", env_text
+            )
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                set(config["provider"]["test-provider"]["models"]),
+                {"chat-model", "chat-model-2"},
             )
             self.assertEqual(
                 make_log.read_text(encoding="utf-8"),
