@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: doctor continuity-doctor dependencies-check dev-preflight install-interactive init layout require-init maintenance-check validate validate-runtime code-search-eval code-search-eval-runtime install install-opencode-ssh opencode-ssh opencode-recreate docker-build docker-up docker-down docker-smoke opencode-ssh-build opencode-ssh-up opencode-ssh-down opencode-ssh-shell opencode-ssh-client-check opencode-web-password ai-config-compile ai-configure opencode-user-config-check opencode-config-reload opencode-auth opencode-runtime-check runtime-config embedding-benchmark reranker-benchmark mcp-local mcp-docker mcp-auto index index-local index-vector index-vector-local burp-status burp-tools burp-validate backup-portable backup-full backup-verify backup-inspect restore test clean package
+.PHONY: doctor continuity-doctor dependencies-check dev-preflight install-interactive init layout require-init maintenance-check validate validate-runtime code-search-eval code-search-eval-runtime install install-opencode-ssh opencode-ssh opencode-recreate docker-build docker-up docker-down docker-smoke opencode-ssh-build opencode-ssh-up opencode-ssh-down opencode-ssh-shell opencode-ssh-client-check opencode-web-password ai-config-compile ai-configure ai-key-update opencode-user-config-check opencode-config-reload opencode-auth opencode-runtime-check runtime-config embedding-benchmark reranker-benchmark mcp-local mcp-docker mcp-auto index index-local index-vector index-vector-local burp-status burp-tools burp-validate backup-portable backup-full backup-verify backup-inspect restore test clean package
 
 BACKUP_DIR ?= ../awoki-backups
 BACKUP ?=
@@ -77,6 +77,7 @@ validate:
 		.harness/bin/prepare-opencode-web-auth \
 		.harness/bin/opencode-web-password \
 		.harness/bin/opencode-user-config-check \
+		.harness/bin/awoki-ai-key-update \
 		.harness/bin/awoki-opencode \
 		.harness/bin/reconcile-opencode-runtime \
 		.harness/bin/reconcile-opencode-port-owner \
@@ -169,6 +170,9 @@ ai-config-compile:
 
 ai-configure: ai-config-compile
 	@$(MAKE) opencode-config-reload
+
+ai-key-update:
+	@.harness/bin/awoki-ai-key-update
 
 opencode-user-config-check:
 	@.harness/bin/opencode-user-config-check

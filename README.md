@@ -376,6 +376,17 @@ compiler removes that prefix before storage; generated requests add exactly one
 `Authorization: Bearer ...` header. The reranker reuses the embedding key through
 `AWOKI_RERANK_API_KEY_ENV`, so the secret is stored only once.
 
+To rotate only that shared key later, use the hidden-input shortcut:
+
+```bash
+make ai-key-update
+```
+
+It preserves the endpoint/model/context settings, regenerates the two local
+configuration files, validates them, and reloads or recreates the running service
+as required. The key is never passed as a command argument. Chat, embeddings, and
+reranking all begin using the new value after the reload.
+
 For automation, pass non-secret values through `AWOKI_AI_BASE_URL`,
 `AWOKI_AI_EMBEDDING_MODEL`, `AWOKI_AI_EMBEDDING_DEPLOYMENT`,
 `AWOKI_AI_VECTOR_SIZE`, `AWOKI_AI_RERANK_URL`, `AWOKI_AI_RERANK_MODEL`,

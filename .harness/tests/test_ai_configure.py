@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIGURATOR = ROOT / ".harness" / "bin" / "awoki-ai-configure"
+KEY_UPDATER = ROOT / ".harness" / "bin" / "awoki-ai-key-update"
 
 
 class AIConfigurationTests(unittest.TestCase):
@@ -93,6 +95,48 @@ class AIConfigurationTests(unittest.TestCase):
             self.assertEqual(embedding["_embedding_headers"]("fake-offline-token"), expected)
             self.assertEqual(reranker["_reranker_headers"]("fake-offline-token"), expected)
 
+            bin_dir = root / ".harness" / "bin"
+            bin_dir.mkdir(parents=True)
+            shutil.copy2(CONFIGURATOR, bin_dir / CONFIGURATOR.name)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            make_log = root / "make.log"
+            fake_make = fake_bin / "make"
+            fake_make.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" > "$AWOKI_TEST_MAKE_LOG"\n',
+                encoding="utf-8",
+            )
+            fake_make.chmod(0o755)
+            env = {
+                **os.environ,
+                "AWOKI_ROOT": str(root),
+                "AWOKI_TEST_MAKE_LOG": str(make_log),
+                "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+            }
+            rotated = subprocess.run(
+                [str(KEY_UPDATER)],
+                cwd=root,
+                env=env,
+                input="Bearer rotated-fake-token\n",
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(rotated.returncode, 0, rotated.stderr)
+            self.assertNotIn("rotated-fake-token", rotated.stdout + rotated.stderr)
+            env_text = (root / ".env").read_text(encoding="utf-8")
+            self.assertIn("AWOKI_EMBEDDING_API_KEY=rotated-fake-token\n", env_text)
+            self.assertNotIn("AWOKI_EMBEDDING_API_KEY=Bearer", env_text)
+            self.assertIn("AWOKI_RERANK_API_KEY=\n", env_text)
+            self.assertIn(
+                "AWOKI_RERANK_API_KEY_ENV=AWOKI_EMBEDDING_API_KEY\n", env_text
+            )
+            self.assertEqual(
+                make_log.read_text(encoding="utf-8"),
+                f"-C {root} opencode-config-reload\n",
+            )
+
     def test_web_backend_imports_only_the_provider_key_from_runtime_snapshot(self) -> None:
         entrypoint = (ROOT / ".harness" / "bin" / "opencode-ssh-entrypoint").read_text(
             encoding="utf-8"
@@ -106,7 +150,6 @@ class AIConfigurationTests(unittest.TestCase):
         )
         self.assertIn('unset "$name"', web_start)
         self.assertIn('exec opencode web', web_start)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="${AWOKI_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONFIGURATOR="$ROOT/.harness/bin/awoki-ai-configure"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'USAGE'
+Usage: make ai-key-update
+       printf '%s\n' "$NEW_KEY" | make ai-key-update
+
+Securely replace the one shared raw API key used by OpenCode chat, embeddings,
+and reranking. Interactive input is hidden. Do not pass the key as an argument.
+The configuration is validated and the running service is reloaded automatically.
+USAGE
+  exit 0
+fi
+[[ $# -eq 0 ]] || { echo "[awoki] ai-key-update does not accept arguments" >&2; exit 2; }
+[[ -x "$CONFIGURATOR" ]] || { echo "[awoki] AI configurator is unavailable: $CONFIGURATOR" >&2; exit 2; }
+
+if [[ -t 0 ]]; then
+  printf 'New shared AI API key (hidden; paste the raw token): ' >&2
+  IFS= read -r -s new_key
+  printf '\n' >&2
+  [[ -n "$new_key" ]] || { echo "[awoki] API key cannot be empty" >&2; exit 2; }
+  printf '%s\n' "$new_key" | "$CONFIGURATOR" --non-interactive --api-key-stdin
+  unset new_key
+else
+  "$CONFIGURATOR" --non-interactive --api-key-stdin
+fi
+
+make -C "$ROOT" opencode-config-reload
+echo "[awoki] shared AI API key updated for chat, embeddings, and reranking."

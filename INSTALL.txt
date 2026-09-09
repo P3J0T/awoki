@@ -393,6 +393,14 @@ JSONC; validates them; and reloads the running service. It automatically derives
 <base-origin>/rerank from a base URL ending in /v1, unless you provide a different
 reranker URL. Never store the literal "Bearer " prefix in .env.
 
+Rotate only the shared API key later without editing either configuration file:
+
+  make ai-key-update
+
+The prompt is hidden. It preserves all model, URL, context, and output settings,
+then validates and reloads/recreates the running service automatically. The one
+new raw key is used by chat, embeddings, and reranking.
+
 Useful checks
 
   make doctor
