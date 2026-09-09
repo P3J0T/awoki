@@ -274,7 +274,7 @@ class AIConfigurationTests(unittest.TestCase):
             env_text = (root / ".env").read_text(encoding="utf-8")
             self.assertIn("AWOKI_EMBEDDING_BASE_URL=https://your-provider.example/v1\n", env_text)
             self.assertIn(
-                "AWOKI_EMBEDDING_MODEL=jinaai/jina-embeddings-v2-base-code\n",
+                "AWOKI_EMBEDDING_MODEL=jina-code-embeddings\n",
                 env_text,
             )
             self.assertIn("AWOKI_RERANK_MODEL=bge-reranker\n", env_text)

@@ -370,7 +370,7 @@ make ai-configure
 
 It explicitly configures a **custom OpenAI-compatible provider**. The fresh
 examples are `https://your-provider.example/v1`,
-`jinaai/jina-embeddings-v2-base-code`, `bge-reranker`, and
+`jina-code-embeddings`, `bge-reranker`, and
 `qwen3.8-27b`; replace the placeholder URL and any unsupported model names with values exposed by
 your provider. It asks once for the shared base URL and raw API key, the embedding
 model/vector size, reranker model/URL, and OpenCode chat model. It then updates `.env`,

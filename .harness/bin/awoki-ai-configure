@@ -296,7 +296,7 @@ def main() -> int:
         args.embedding_model,
         "AWOKI_AI_EMBEDDING_MODEL",
         current.get("AWOKI_EMBEDDING_MODEL", ""),
-        "jinaai/jina-embeddings-v2-base-code",
+        "jina-code-embeddings",
     )
     embedding_deployment = _choose(
         args.embedding_deployment,
