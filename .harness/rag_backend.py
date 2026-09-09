@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from provider_auth import provider_auth_headers, provider_auth_settings
+
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{2,}")
 DEFAULT_VECTOR_SIZE = 768
 DEFAULT_EMBEDDING_MODEL = "text-embeddings-inference"
@@ -277,16 +279,29 @@ def _openai_embed_texts(texts: list[str], cfg: EmbeddingConfig, *, is_query: boo
         0,
         5,
     )
+    default_headers: dict[str, Any] = {"User-Agent": "awoki-runtime"}
+    auth_mode, auth_header = provider_auth_settings()
+    omit_authorization = False
+    if auth_mode == "header":
+        default_headers.update(provider_auth_headers(api_key))
+        if auth_header.lower() != "authorization":
+            # The OpenAI client otherwise synthesizes Authorization: Bearer from
+            # api_key. Its validator recognizes omission only on request headers.
+            omit_authorization = True
     client_kwargs: dict[str, Any] = {
         "api_key": api_key,
         "timeout": timeout,
         "max_retries": max_retries,
-        "default_headers": {"User-Agent": "awoki-runtime"},
+        "default_headers": default_headers,
     }
     if base_url:
         client_kwargs["base_url"] = base_url
     client = OpenAI(**client_kwargs)
     kwargs: dict[str, Any] = {"model": cfg.model, "input": texts}
+    if omit_authorization:
+        from openai import Omit
+
+        kwargs["extra_headers"] = {"Authorization": Omit()}
     if os.environ.get("AWOKI_VECTOR_SIZE", "").isdigit() and cfg.model.startswith("text-embedding-3"):
         kwargs["dimensions"] = vector_size()
     response = client.embeddings.create(**kwargs)
@@ -734,16 +749,31 @@ def probe_retrieval(
                             "embedding probe requires an API key or OpenAI-compatible base URL"
                         )
                     api_key = configured_key or "awoki-local-endpoint"
+                    default_headers: dict[str, Any] = {"User-Agent": "awoki-runtime"}
+                    auth_mode, auth_header = provider_auth_settings()
+                    omit_authorization = False
+                    if auth_mode == "header":
+                        default_headers.update(provider_auth_headers(api_key))
+                        if auth_header.lower() != "authorization":
+                            omit_authorization = True
                     kwargs: dict[str, Any] = {
                         "api_key": api_key,
                         "timeout": max(0.1, remaining_timeout()),
                         "max_retries": 0,
-                        "default_headers": {"User-Agent": "awoki-runtime"},
+                        "default_headers": default_headers,
                     }
                     if base_url:
                         kwargs["base_url"] = base_url
                     client = OpenAI(**kwargs)
-                    response = client.embeddings.create(model=cfg.model, input=["awoki retrieval health probe"])
+                    request_kwargs: dict[str, Any] = {
+                        "model": cfg.model,
+                        "input": ["awoki retrieval health probe"],
+                    }
+                    if omit_authorization:
+                        from openai import Omit
+
+                        request_kwargs["extra_headers"] = {"Authorization": Omit()}
+                    response = client.embeddings.create(**request_kwargs)
                     size = len(response.data[0].embedding) if response.data else 0
                     _LAST_EMBEDDING_ERROR = ""
                     result["embedding"] = {
@@ -1190,8 +1220,7 @@ def _remote_rerank_scores(query: str, documents: list[str], profile: dict[str, A
     except Exception as exc:  # pragma: no cover - dependency is required in normal installs
         raise RuntimeError("httpx is required for AWOKI_RERANK_PROVIDER=http|tei") from exc
     headers = {"Content-Type": "application/json", "User-Agent": "awoki-runtime"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers.update(provider_auth_headers(api_key))
     provider = str(profile.get("provider") or "http").lower()
     top_n = min(int(profile.get("top_n") or len(documents)), len(documents))
     if provider == "tei":

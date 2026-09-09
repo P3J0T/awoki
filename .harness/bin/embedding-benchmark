@@ -5,10 +5,15 @@ import argparse
 import json
 import math
 import os
+from pathlib import Path
+import sys
 import time
 from typing import Any
 import http.client
 from urllib.parse import urlsplit, urlunsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from provider_auth import provider_auth_headers
 
 
 def _positive_int(value: str) -> int:
@@ -80,11 +85,12 @@ def _error_payload(stage: str, exc: BaseException, *, elapsed: float | None = No
 
 
 def _embedding_headers(api_key: str) -> dict[str, str]:
-    return {
+    headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
         "User-Agent": "awoki-runtime",
     }
+    headers.update(provider_auth_headers(api_key))
+    return headers
 
 
 

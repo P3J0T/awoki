@@ -194,8 +194,9 @@ runuser -u op -- env -i \
     [[ -r "$runtime_env_file" && -f "$runtime_env_file" && ! -L "$runtime_env_file" ]] || exit 2
     # User provider configs may reference the same raw API key used by Awoki
     # retrieval. Import the root-generated snapshot, then discard every other
-    # exported runtime setting before starting OpenCode Web. The provider adds
-    # the Authorization scheme; the stored value must not include "Bearer ".
+    # exported runtime setting before starting OpenCode Web. The generated
+    # provider applies either the default Authorization: Bearer form or the
+    # selected custom header; the stored value never includes "Bearer ".
     source "$runtime_env_file"
     while IFS="=" read -r declaration _; do
       name="${declaration#export }"

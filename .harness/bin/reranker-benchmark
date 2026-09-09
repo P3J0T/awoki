@@ -4,11 +4,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 import re
+import sys
 import time
 from typing import Any
 import http.client
 from urllib.parse import urlsplit, urlunsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from provider_auth import provider_auth_headers
 
 
 def _positive_int(value: str) -> int:
@@ -64,8 +69,7 @@ def _bounded_error(exc: BaseException) -> dict[str, str]:
 
 def _reranker_headers(api_key: str) -> dict[str, str]:
     headers = {"Content-Type": "application/json", "User-Agent": "awoki-runtime"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers.update(provider_auth_headers(api_key))
     return headers
 
 

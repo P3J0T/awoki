@@ -192,6 +192,7 @@ class CoreTests(unittest.TestCase):
 
         class Embeddings:
             def create(self, **kwargs):
+                self.kwargs = kwargs
                 return type("Response", (), {"data": [EmbeddingItem()]})()
 
         clients = []
@@ -215,6 +216,51 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(vector, [1.0, 0.0])
         self.assertEqual(clients[0].kwargs["timeout"], 5.0)
         self.assertEqual(clients[0].kwargs["max_retries"], 0)
+
+    def test_openai_compatible_embedding_custom_header_omits_bearer_auth(self):
+        class EmbeddingItem:
+            embedding = [1.0, 0.0]
+
+        class Embeddings:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                return type("Response", (), {"data": [EmbeddingItem()]})()
+
+        clients = []
+
+        class FakeOpenAI:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.embeddings = Embeddings()
+                clients.append(self)
+
+        class FakeOmit:
+            pass
+
+        fake_openai = type(
+            "FakeOpenAIModule", (), {"OpenAI": FakeOpenAI, "Omit": FakeOmit}
+        )()
+        cfg = rag_backend.EmbeddingConfig(
+            provider="openai",
+            model="embedding-model",
+            batch_size=32,
+            normalize=True,
+            query_prefix="",
+            document_prefix="",
+            explicit_vector_size=2,
+        )
+        with patched_env(
+            AWOKI_EMBEDDING_BASE_URL="http://embedding.example.invalid:8000/v1",
+            AWOKI_EMBEDDING_API_KEY="custom-header-token",
+            AWOKI_AI_AUTH_MODE="header",
+            AWOKI_AI_AUTH_HEADER="X-API-Key",
+        ), mock.patch.dict(sys.modules, {"openai": fake_openai}):
+            vectors = rag_backend._openai_embed_texts(["test"], cfg)
+        headers = clients[0].kwargs["default_headers"]
+        self.assertEqual(headers["X-API-Key"], "custom-header-token")
+        self.assertNotIn("Authorization", headers)
+        self.assertIsInstance(clients[0].embeddings.kwargs["extra_headers"]["Authorization"], FakeOmit)
+        self.assertEqual(vectors, [[1.0, 0.0]])
 
     def test_retrieval_status_snapshot_is_passive_and_does_not_probe_qdrant(self):
         original = dict(rag_backend._LAST_QDRANT_PROBE)

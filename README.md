@@ -368,12 +368,24 @@ use the guided compiler instead of editing `.env` and JSONC independently:
 make ai-configure
 ```
 
-It asks once for the shared base URL and raw API key, the embedding model/vector
-size, reranker model/URL, and OpenCode chat model. It then updates `.env`,
+It explicitly configures a **custom OpenAI-compatible provider**. The fresh
+examples are `https://your-provider.example/v1`,
+`jinaai/jina-embeddings-v2-base-code`, `bge-reranker`, and
+`qwen3.8-27b`; replace the placeholder URL and any unsupported model names with values exposed by
+your provider. It asks once for the shared base URL and raw API key, the embedding
+model/vector size, reranker model/URL, and OpenCode chat model. It then updates `.env`,
 generates `.opencode-state/config/opencode.jsonc`, validates the result, and
-reloads a running OpenCode service. If a pasted key begins with `Bearer `, the
-compiler removes that prefix before storage; generated requests add exactly one
-`Authorization: Bearer ...` header. The reranker reuses the embedding key through
+reloads a running OpenCode service.
+
+The authentication prompt offers:
+
+- `bearer` (default): `Authorization: Bearer <raw key>`;
+- `header`: a custom header name such as `X-API-Key`, sent as
+  `X-API-Key: <raw key>` without a prefix.
+
+The selected form applies consistently to chat, embeddings, and reranking. If a
+pasted key begins with `Bearer `, the compiler removes that prefix before storing
+the shared raw value. The reranker reuses the embedding key through
 `AWOKI_RERANK_API_KEY_ENV`, so the secret is stored only once.
 
 To rotate only that shared key later, use the hidden-input shortcut:
@@ -404,7 +416,8 @@ any of these models.
 For automation, pass non-secret values through `AWOKI_AI_BASE_URL`,
 `AWOKI_AI_EMBEDDING_MODEL`, `AWOKI_AI_EMBEDDING_DEPLOYMENT`,
 `AWOKI_AI_VECTOR_SIZE`, `AWOKI_AI_RERANK_URL`, `AWOKI_AI_RERANK_MODEL`,
-`AWOKI_AI_CHAT_MODEL`, `AWOKI_AI_PROVIDER_ID`, and related `AWOKI_AI_*`
+`AWOKI_AI_CHAT_MODEL`, `AWOKI_AI_PROVIDER_ID`, `AWOKI_AI_AUTH_MODE`,
+`AWOKI_AI_AUTH_HEADER`, and related `AWOKI_AI_*`
 metadata. Pass the secret through `AWOKI_AI_API_KEY` in the process environment
 or use `AI_CONFIG_ARGS="--non-interactive --api-key-stdin"`; do not put it in a
 Make argument. `make ai-config-compile` performs the same compilation without a
@@ -418,6 +431,8 @@ For semantic retrieval, the key settings are:
 ```text
 AWOKI_EMBEDDING_BASE_URL=
 AWOKI_EMBEDDING_API_KEY=
+AWOKI_AI_AUTH_MODE=bearer
+AWOKI_AI_AUTH_HEADER=Authorization
 AWOKI_EMBEDDING_DEPLOYMENT_ID=
 AWOKI_VECTOR_SIZE=768
 ```

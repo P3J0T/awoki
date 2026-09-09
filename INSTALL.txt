@@ -387,11 +387,21 @@ Preferred shared-endpoint configuration
 
   make ai-configure
 
-This guided command collects one raw API key plus the chat, embedding, and
-reranker model identities; generates both .env and the ignored OpenCode user
+This guided command explicitly configures one custom OpenAI-compatible provider.
+Fresh prompts use the generic URL https://your-provider.example/v1 and default to
+jinaai/jina-embeddings-v2-base-code for embeddings, bge-reranker for reranking,
+and qwen3.8-27b for chat completion. Replace values not actually served by your
+provider. It collects one raw API key plus the chat,
+embedding, and reranker model identities; generates both .env and the ignored OpenCode user
 JSONC; validates them; and reloads the running service. It automatically derives
 <base-origin>/rerank from a base URL ending in /v1, unless you provide a different
-reranker URL. Never store the literal "Bearer " prefix in .env.
+reranker URL. Authentication is a guided choice:
+
+  bearer (default) -> Authorization: Bearer <raw key>
+  header           -> <custom header name>: <raw key>
+
+The selected form is generated consistently for chat, embeddings, and reranking.
+Never store the literal "Bearer " prefix in .env.
 
 Rotate only the shared API key later without editing either configuration file:
 

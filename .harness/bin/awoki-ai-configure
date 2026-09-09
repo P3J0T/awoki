@@ -18,6 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 ENV_KEY_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 
 class ConfigurationError(ValueError):
@@ -255,6 +256,8 @@ def main() -> int:
         help="add or update one model on the currently managed provider",
     )
     parser.add_argument("--api-key-stdin", action="store_true")
+    parser.add_argument("--auth-mode", choices=("bearer", "header"))
+    parser.add_argument("--auth-header")
     parser.add_argument("--base-url")
     parser.add_argument("--embedding-model")
     parser.add_argument("--embedding-deployment")
@@ -287,13 +290,13 @@ def main() -> int:
         args.base_url,
         "AWOKI_AI_BASE_URL",
         current.get("AWOKI_EMBEDDING_BASE_URL", ""),
-        "",
+        "https://your-provider.example/v1",
     )
     embedding_model = _choose(
         args.embedding_model,
         "AWOKI_AI_EMBEDDING_MODEL",
         current.get("AWOKI_EMBEDDING_MODEL", ""),
-        "text-embeddings-inference",
+        "jinaai/jina-embeddings-v2-base-code",
     )
     embedding_deployment = _choose(
         args.embedding_deployment,
@@ -317,13 +320,13 @@ def main() -> int:
         args.rerank_model,
         "AWOKI_AI_RERANK_MODEL",
         current.get("AWOKI_RERANK_MODEL", ""),
-        "",
+        "bge-reranker",
     )
     chat_model = _choose(
         args.chat_model,
         "AWOKI_AI_CHAT_MODEL",
         current.get("AWOKI_OPENCODE_MODEL", ""),
-        "",
+        "qwen3.8-27b",
     )
     provider_id = _choose(
         args.provider_id,
@@ -335,7 +338,7 @@ def main() -> int:
         args.provider_name,
         "AWOKI_AI_PROVIDER_NAME",
         current.get("AWOKI_OPENCODE_PROVIDER_NAME", ""),
-        "Custom OpenAI",
+        "Custom OpenAI-compatible Provider",
     )
     model_name = _choose(
         args.model_name,
@@ -355,6 +358,18 @@ def main() -> int:
         current.get("AWOKI_OPENCODE_OUTPUT", ""),
         "8192",
     )
+    auth_mode = _choose(
+        args.auth_mode,
+        "AWOKI_AI_AUTH_MODE",
+        current.get("AWOKI_AI_AUTH_MODE", ""),
+        "bearer",
+    ).strip().lower()
+    auth_header = _choose(
+        args.auth_header,
+        "AWOKI_AI_AUTH_HEADER",
+        current.get("AWOKI_AI_AUTH_HEADER", ""),
+        "Authorization" if auth_mode == "bearer" else "X-API-Key",
+    ).strip()
 
     if args.add_chat_model:
         key_input = current.get("AWOKI_EMBEDDING_API_KEY", "")
@@ -373,7 +388,21 @@ def main() -> int:
             context = _prompt("Context limit in tokens (positive integer)", context)
             output = _prompt("Output limit in tokens (positive integer)", output)
         else:
-            base_url = _prompt("OpenAI-compatible base URL (http(s), usually ending in /v1)", base_url)
+            print("Configure a custom OpenAI-compatible provider for chat, embeddings, and reranking.")
+            base_url = _prompt("Custom provider base URL (http(s), usually ending in /v1)", base_url)
+            auth_mode = _prompt(
+                "Authentication mode (bearer = Authorization: Bearer <key>; header = custom header: <key>)",
+                auth_mode,
+            ).lower()
+            if auth_mode == "bearer":
+                auth_header = "Authorization"
+            elif auth_mode == "header":
+                suggested_header = (
+                    auth_header
+                    if auth_header and auth_header.lower() != "authorization"
+                    else "X-API-Key"
+                )
+                auth_header = _prompt("Custom API-key header name (raw key value)", suggested_header)
             embedding_model = _prompt("Embedding model ID", embedding_model)
             embedding_deployment = _prompt("Embedding deployment ID", embedding_deployment)
             vector_size = _prompt("Embedding vector size (positive integer)", vector_size)
@@ -400,6 +429,14 @@ def main() -> int:
         )
 
     base_url = _validated_url(base_url, "base URL")
+    if auth_mode not in {"bearer", "header"}:
+        raise ConfigurationError("authentication mode must be 'bearer' or 'header'")
+    if auth_mode == "bearer":
+        auth_header = "Authorization"
+    if not HEADER_NAME_RE.fullmatch(auth_header):
+        raise ConfigurationError("authentication header must be a valid HTTP header name")
+    if auth_header.lower() in {"content-type", "user-agent"}:
+        raise ConfigurationError("authentication header cannot be Content-Type or User-Agent")
     if not rerank_url and not args.no_reranker:
         rerank_url = _default_rerank_url(base_url)
     if rerank_url:
@@ -429,6 +466,8 @@ def main() -> int:
         "AWOKI_EMBEDDING_DEPLOYMENT_ID": embedding_deployment.strip(),
         "AWOKI_EMBEDDING_BASE_URL": base_url,
         "AWOKI_EMBEDDING_API_KEY": key,
+        "AWOKI_AI_AUTH_MODE": auth_mode,
+        "AWOKI_AI_AUTH_HEADER": auth_header,
         "AWOKI_VECTOR_SIZE": str(vector_size_int),
         "AWOKI_RERANK_ENABLED": "0" if args.no_reranker else "1",
         "AWOKI_RERANK_PROVIDER": "http",
@@ -463,17 +502,25 @@ def main() -> int:
     if not isinstance(headers, dict):
         raise ConfigurationError(f"OpenCode provider {provider_id!r} headers must be an object")
     headers = dict(headers)
-    headers.update({
-        "Authorization": "Bearer {env:AWOKI_EMBEDDING_API_KEY}",
-        "User-Agent": "awoki-runtime",
-    })
+    previous_auth_header = current.get("AWOKI_AI_AUTH_HEADER", "Authorization").strip()
+    if previous_auth_header:
+        headers.pop(previous_auth_header, None)
+    headers.pop("Authorization", None)
+    if auth_mode == "bearer":
+        headers["Authorization"] = "Bearer {env:AWOKI_EMBEDDING_API_KEY}"
+    else:
+        headers[auth_header] = "{env:AWOKI_EMBEDDING_API_KEY}"
+    headers["User-Agent"] = "awoki-runtime"
     options.update({
         "baseURL": base_url,
-        "apiKey": "{env:AWOKI_EMBEDDING_API_KEY}",
         "headers": headers,
         "timeout": 600000,
         "chunkTimeout": 60000,
     })
+    if auth_mode == "bearer":
+        options["apiKey"] = "{env:AWOKI_EMBEDDING_API_KEY}"
+    else:
+        options.pop("apiKey", None)
     models = provider_config.get("models", {})
     if not isinstance(models, dict):
         raise ConfigurationError(f"OpenCode provider {provider_id!r} models must be an object")
@@ -515,7 +562,10 @@ def main() -> int:
     else:
         print(f"reranker_model={rerank_model.strip()} url={rerank_url}")
     print(f"chat_model={provider_id}/{chat_model.strip()}")
-    print("authentication=Bearer <AWOKI_EMBEDDING_API_KEY> (one stored raw key)")
+    if auth_mode == "bearer":
+        print("authentication=Authorization: Bearer <AWOKI_EMBEDDING_API_KEY> (default; one stored raw key)")
+    else:
+        print(f"authentication={auth_header}: <AWOKI_EMBEDDING_API_KEY> (one stored raw key)")
     if removed_prefix:
         print("normalization=removed supplied Bearer prefix before storing the key")
     return 0

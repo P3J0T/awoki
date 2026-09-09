@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -186,6 +187,100 @@ class AIConfigurationTests(unittest.TestCase):
         )
         self.assertIn('unset "$name"', web_start)
         self.assertIn('exec opencode web', web_start)
+
+    def test_custom_header_auth_applies_to_all_three_custom_provider_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env = {
+                **os.environ,
+                "AWOKI_ROOT": str(root),
+                "AWOKI_AI_BASE_URL": "https://custom.example.test/v1",
+                "AWOKI_AI_API_KEY": "custom-header-token",
+                "AWOKI_AI_AUTH_MODE": "header",
+                "AWOKI_AI_AUTH_HEADER": "X-API-Key",
+                "AWOKI_AI_EMBEDDING_MODEL": "embedding-model",
+                "AWOKI_AI_VECTOR_SIZE": "768",
+                "AWOKI_AI_RERANK_MODEL": "reranker-model",
+                "AWOKI_AI_CHAT_MODEL": "chat-model",
+            }
+            completed = subprocess.run(
+                [sys.executable, str(CONFIGURATOR), "--non-interactive"],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertNotIn("custom-header-token", completed.stdout + completed.stderr)
+
+            env_text = (root / ".env").read_text(encoding="utf-8")
+            self.assertIn("AWOKI_AI_AUTH_MODE=header\n", env_text)
+            self.assertIn("AWOKI_AI_AUTH_HEADER=X-API-Key\n", env_text)
+            config = json.loads(
+                (root / ".opencode-state" / "config" / "opencode.jsonc").read_text(
+                    encoding="utf-8"
+                )
+            )
+            options = config["provider"]["custom-openai"]["options"]
+            self.assertNotIn("apiKey", options)
+            self.assertNotIn("Authorization", options["headers"])
+            self.assertEqual(
+                options["headers"]["X-API-Key"],
+                "{env:AWOKI_EMBEDDING_API_KEY}",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"AWOKI_AI_AUTH_MODE": "header", "AWOKI_AI_AUTH_HEADER": "X-API-Key"},
+            ):
+                embedding = runpy.run_path(
+                    str(ROOT / ".harness" / "bin" / "embedding-benchmark")
+                )
+                reranker = runpy.run_path(
+                    str(ROOT / ".harness" / "bin" / "reranker-benchmark")
+                )
+                expected = {
+                    "Content-Type": "application/json",
+                    "X-API-Key": "custom-header-token",
+                    "User-Agent": "awoki-runtime",
+                }
+                self.assertEqual(
+                    embedding["_embedding_headers"]("custom-header-token"), expected
+                )
+                self.assertEqual(
+                    reranker["_reranker_headers"]("custom-header-token"), expected
+                )
+
+    def test_fresh_custom_provider_defaults_are_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            env = {
+                **os.environ,
+                "AWOKI_ROOT": str(root),
+                "AWOKI_AI_API_KEY": "offline-default-token",
+            }
+            completed = subprocess.run(
+                [sys.executable, str(CONFIGURATOR), "--non-interactive"],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            env_text = (root / ".env").read_text(encoding="utf-8")
+            self.assertIn("AWOKI_EMBEDDING_BASE_URL=https://your-provider.example/v1\n", env_text)
+            self.assertIn(
+                "AWOKI_EMBEDDING_MODEL=jinaai/jina-embeddings-v2-base-code\n",
+                env_text,
+            )
+            self.assertIn("AWOKI_RERANK_MODEL=bge-reranker\n", env_text)
+            self.assertIn("AWOKI_OPENCODE_MODEL=qwen3.8-27b\n", env_text)
+            self.assertIn("AWOKI_AI_AUTH_MODE=bearer\n", env_text)
+            self.assertIn("AWOKI_AI_AUTH_HEADER=Authorization\n", env_text)
 
 if __name__ == "__main__":
     unittest.main()
