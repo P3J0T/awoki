@@ -1287,12 +1287,31 @@ PY
         env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
         compose = (ROOT / "docker-compose.opencode.yml").read_text(encoding="utf-8")
         compose_mcp = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        operator_reference = (ROOT / "docs/OPERATOR_REFERENCE.md").read_text(encoding="utf-8")
         self.assertIn("AWOKI_CODE_RERANK_TIMEOUT_SECONDS=\n", env_example)
         self.assertIn("AWOKI_CODE_RERANK_TIMEOUT_SECONDS: ${AWOKI_CODE_RERANK_TIMEOUT_SECONDS:-}", compose)
         self.assertIn("AWOKI_CODE_RERANK_TIMEOUT_SECONDS: ${AWOKI_CODE_RERANK_TIMEOUT_SECONDS:-}", compose_mcp)
-        self.assertIn("inherits the shared `AWOKI_RERANK_TIMEOUT_SECONDS`", readme)
-        self.assertIn("historical stock 5-second", readme)
+        self.assertIn("inherits the shared `AWOKI_RERANK_TIMEOUT_SECONDS`", operator_reference)
+        self.assertIn("historical stock 5-second", operator_reference)
+
+    def test_readme_upgrade_backs_up_before_update_and_links_to_detailed_guides(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        block = re.search(r"## Upgrade with a backup.*?```bash\n(.*?)```", readme, re.S)
+        self.assertIsNotNone(block)
+        script = block.group(1)
+        for required in ("set -eu", "git status --porcelain", "git bundle create", "BACKUP_STOP_CONTAINERS=1", "git pull --ff-only"):
+            self.assertIn(required, script)
+        self.assertLess(script.index("make backup-full"), script.index("git pull"))
+        self.assertLess(script.index("git pull"), script.index("make opencode-recreate"))
+        self.assertNotIn("BACKUP_INCLUDE_SECRETS=1", script)
+        self.assertNotIn("BACKUP_INCLUDE_OPENCODE_STATE=1", script)
+        parsed = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True, check=False)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        guide = ROOT / "docs/PROJECT_GUIDE.md"
+        for base, content in ((ROOT, readme), (guide.parent, guide.read_text(encoding="utf-8"))):
+            for target in re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", content):
+                if "://" not in target:
+                    self.assertTrue((base / target).is_file(), target)
 
     def test_pre_structural_baseline_is_frozen_and_honest(self) -> None:
         baseline_path = (

@@ -388,23 +388,34 @@ def validate_continuity_contract() -> None:
     architecture_text = (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
     continuity_text = (ROOT / "docs" / "CONTINUITY.md").read_text(encoding="utf-8")
     for required in (
-        "Why Awoki exists",
-        "What using it should feel like",
-        "Natural security/code-review workflow",
-        "Current development phase: prove usefulness, then simplify",
+        "## First install",
+        "## Upgrade with a backup",
+        "## Custom chat, embeddings and reranking",
+        "## Start a review",
+        "## Boundaries",
+        "docs/BACKUP_RESTORE.md",
+        "docs/OPENCODE_SSH.md",
+        "docs/CODE_SEARCH.md",
+        "docs/CONTINUITY.md",
         "docs/AWOKI_IDENTITY.md",
         "docs/USEFULNESS_EVALUATION.md",
         "docs/OPERATOR_REFERENCE.md",
+        "docs/PROJECT_GUIDE.md",
         "repository_prepare_start",
         "FULL_READY",
         "LOCAL_READY",
         "active working set",
         "code_exact_search",
-        "slim orientation view",
-        "How a normal investigation flows",
-        "```mermaid",
     ):
         assert required in readme_text, f"README.md missing public onboarding guidance: {required}"
+    project_guide = (ROOT / "docs/PROJECT_GUIDE.md").read_text(encoding="utf-8")
+    for required in (
+        "Why Awoki exists", "What using it should feel like",
+        "Natural security/code-review workflow", "How a normal investigation flows",
+        "Current development phase: prove usefulness, then simplify",
+        "slim orientation view", "```mermaid",
+    ):
+        assert required in project_guide, f"PROJECT_GUIDE.md missing detailed guidance: {required}"
     for required in ("Component and data-flow view", "```mermaid", "Session work ledger"):
         assert required in architecture_text, f"ARCHITECTURE.md missing visual architecture guidance: {required}"
     for required in ("Long-session / compaction execution", "sequenceDiagram", "automatic_context_pressure"):
