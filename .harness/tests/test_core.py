@@ -112,8 +112,8 @@ class CoreTests(unittest.TestCase):
         with patched_env(AWOKI_EMBEDDING_PROVIDER=None, AWOKI_EMBEDDING_MODEL=None, AWOKI_QDRANT_COLLECTION=None):
             profile = rag_backend.embedding_profile()
             self.assertEqual(profile["provider"], "openai")
-            self.assertEqual(profile["model"], "text-embeddings-inference")
-            self.assertEqual(rag_backend.qdrant_collection_name(), "awoki_openai_text_embeddings_inference")
+            self.assertEqual(profile["model"], "jina-code-embeddings")
+            self.assertEqual(rag_backend.qdrant_collection_name(), "awoki_openai_jina_code_embeddings")
 
     def test_embedding_profile_reports_endpoint_without_exposing_key(self):
         with patched_env(

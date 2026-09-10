@@ -130,6 +130,8 @@ class AIConfigurationTests(unittest.TestCase):
             bin_dir = root / ".harness" / "bin"
             bin_dir.mkdir(parents=True)
             shutil.copy2(CONFIGURATOR, bin_dir / CONFIGURATOR.name)
+            for module in ("jsonc.py", "provider_auth.py"):
+                shutil.copy2(ROOT / ".harness" / module, bin_dir.parent / module)
             fake_bin = root / "fake-bin"
             fake_bin.mkdir()
             make_log = root / "make.log"
@@ -171,7 +173,7 @@ class AIConfigurationTests(unittest.TestCase):
             )
             self.assertEqual(
                 make_log.read_text(encoding="utf-8"),
-                f"-C {root} opencode-config-reload\n",
+                f"-C {root.resolve()} opencode-config-reload\n",
             )
 
     def test_web_backend_imports_only_the_provider_key_from_runtime_snapshot(self) -> None:

@@ -1,0 +1,41 @@
+name: Validate Awoki
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install constrained Python dependencies
+        run: |
+          python -m pip install -r requirements.txt -c requirements.lock
+          python -m pip check
+      - name: Resolve and type-check the current OpenCode SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_version="$(npm view opencode-ai version)"
+          sdk_dir="$(mktemp -d)"
+          npm install --prefix "$sdk_dir" --ignore-scripts --save-exact \
+            typescript@7.0.2 @types/node@22.20.2 \
+            "@opencode-ai/plugin@$sdk_version" "@opencode-ai/sdk@$sdk_version"
+          AWOKI_PLUGIN_NODE_MODULES="$sdk_dir/node_modules" \
+            python .harness/validate_opencode_plugin.py --require-sdk
+      - name: Validate source and run regression suite
+        run: make validate PYTHON=python
+      - name: Exercise all provider authentication contracts on loopback
+        run: make ai-config-test PYTHON=python

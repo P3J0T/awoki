@@ -3050,21 +3050,44 @@ class AcceptanceRunProgressionTests(unittest.TestCase):
 
     def test_harness_self_check_is_bounded_allowlisted_mcp_regression_runner(self):
         paths = HarnessPaths(root=Path(__file__).resolve().parents[2], global_root=Path("/tmp/awoki-test-global"))
-        rejected = harness_self_check("arbitrary-shell", paths=paths)
-        self.assertEqual(rejected["status"], "rejected")
-        self.assertEqual(rejected["available_checks"], ["compaction_acceptance_boundaries", "detached_self_resume_bounds", "reference_navigation_boundaries"])
-        contract = harness_self_check("compaction_acceptance_boundaries", paths=paths)
-        self.assertEqual(contract["status"], "passed")
-        self.assertEqual(contract["test_count"], 15)
-        self.assertEqual(contract["returncode"], 0)
-        references = harness_self_check("reference_navigation_boundaries", paths=paths)
-        self.assertEqual(references["status"], "passed")
-        self.assertEqual(references["test_count"], 3)
-        self.assertEqual(references["returncode"], 0)
-        passed = harness_self_check("detached_self_resume_bounds", paths=paths)
-        self.assertEqual(passed["status"], "passed")
-        self.assertEqual(passed["test_count"], 3)
-        self.assertEqual(passed["returncode"], 0)
+        # The selected tests are already discovered by the full suite. Re-running
+        # them inside a 20-second child made this contract test depend on host
+        # load/filesystem latency. Verify dispatch and bounds deterministically;
+        # keep the production deadline and the selected tests unchanged.
+        completed = subprocess.CompletedProcess([], 0, stdout="synthetic successful unittest result")
+        with mock.patch("harness_core.subprocess.run", return_value=completed) as run:
+            rejected = harness_self_check("arbitrary-shell", paths=paths)
+            self.assertEqual(rejected["status"], "rejected")
+            self.assertEqual(rejected["available_checks"], ["compaction_acceptance_boundaries", "detached_self_resume_bounds", "reference_navigation_boundaries"])
+            run.assert_not_called()
+            for check, count in (("compaction_acceptance_boundaries", 15), ("reference_navigation_boundaries", 3), ("detached_self_resume_bounds", 3)):
+                result = harness_self_check(check, paths=paths)
+                self.assertEqual(result["status"], "passed")
+                self.assertEqual(result["test_count"], count)
+                self.assertEqual(result["returncode"], 0)
+                args, kwargs = run.call_args
+                self.assertEqual(args[0], [sys.executable, "-m", "unittest", *result["tests"]])
+                self.assertEqual(kwargs["timeout"], 20)
+                self.assertEqual(kwargs["cwd"], paths.root / ".harness/tests")
+                self.assertNotIn("shell", kwargs)
+                selected = unittest.defaultTestLoader.loadTestsFromNames(result["tests"])
+                self.assertEqual(selected.countTestCases(), count)
+                self.assertFalse(unittest.defaultTestLoader.errors)
+            self.assertEqual(run.call_count, 3)
+
+    def test_harness_self_check_preserves_failure_and_timeout_outcomes(self):
+        paths = HarnessPaths(root=Path(__file__).resolve().parents[2], global_root=Path("/tmp/awoki-test-global"))
+        failed = subprocess.CompletedProcess([], 1, stdout="x" * 9000)
+        with mock.patch("harness_core.subprocess.run", return_value=failed):
+            result = harness_self_check("compaction_acceptance_boundaries", paths=paths)
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["returncode"], 1)
+            self.assertEqual(len(result["output"]), 8000)
+        with mock.patch("harness_core.subprocess.run", side_effect=subprocess.TimeoutExpired("unittest", 20)):
+            result = harness_self_check("compaction_acceptance_boundaries", paths=paths)
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["reason"], "harness_self_check_timeout")
+            self.assertEqual(result["timeout_seconds"], 20)
 
 
 

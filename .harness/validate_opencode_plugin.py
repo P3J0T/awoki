@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -25,13 +27,30 @@ CODE_SESSION_TOOLS = [
 
 
 def main() -> int:
-    tsc = shutil.which("tsc")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--require-sdk", action="store_true", help="fail unless real matching SDK types are checked")
+    args = parser.parse_args()
+    modules = Path(os.environ.get("AWOKI_PLUGIN_NODE_MODULES") or ROOT / ".opencode" / "node_modules")
+    sdk_types = modules / "@opencode-ai" / "plugin" / "dist" / "index.d.ts"
+    real_sdk = sdk_types.is_file()
+    tsc = shutil.which("tsc") or (str(modules / ".bin" / "tsc") if (modules / ".bin" / "tsc").exists() else None)
+    if args.require_sdk and (not tsc or not real_sdk):
+        raise SystemExit("real SDK validation requires TypeScript and matching @opencode-ai/plugin + SDK packages")
     if not tsc:
         print("TypeScript compiler not available; skipping OpenCode plugin validation")
         return 0
     if not PLUGIN.exists():
         raise SystemExit(f"missing OpenCode plugin: {PLUGIN}")
-    stub = '''declare module "@opencode-ai/plugin" {
+    if real_sdk:
+        plugin_version = json.loads((modules / "@opencode-ai/plugin/package.json").read_text())["version"]
+        sdk_version = json.loads((modules / "@opencode-ai/sdk/package.json").read_text())["version"]
+        if plugin_version != sdk_version:
+            raise SystemExit("OpenCode plugin and SDK versions must match for compatibility validation")
+        stub = 'declare const Bun: any\n'
+    else:
+        # This portable smoke test is not an SDK compatibility verdict. CI uses
+        # --require-sdk and may never take this branch.
+        stub = '''declare module "@opencode-ai/plugin" {
   export type Plugin = (ctx: any) => Promise<Record<string, any>>
 }
 declare module "node:path" {
@@ -44,30 +63,36 @@ declare const Bun: any
         stub_path = temp / "opencode-plugin-stub.d.ts"
         output_dir = temp / "compiled"
         stub_path.write_text(stub, encoding="utf-8")
-        subprocess.run(
-            [
-                tsc,
-                "--target", "ES2022",
-                "--module", "commonjs",
-                "--moduleResolution", "node",
-                "--skipLibCheck",
-                "--noImplicitAny", "false",
-                "--lib", "ES2022,DOM",
-                "--outDir", str(output_dir),
-                str(stub_path),
-                str(PLUGIN),
-            ],
-            cwd=ROOT,
-            check=True,
-        )
+        config = {
+            "compilerOptions": {
+                "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler",
+                "skipLibCheck": True, "noImplicitAny": False, "lib": ["ES2022", "DOM"],
+                "outDir": str(output_dir), "rootDir": str(PLUGIN.parent),
+            },
+            "files": [str(stub_path), str(PLUGIN)],
+        }
+        if real_sdk:
+            config["compilerOptions"].update({
+                "paths": {"@opencode-ai/plugin": [str(sdk_types)]},
+                "typeRoots": [str(modules / "@types")],
+                "types": ["node"],
+            })
+        config_path = temp / "tsconfig.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        subprocess.run([tsc, "--project", str(config_path)], cwd=ROOT, check=True)
+        if real_sdk:
+            print(f"OpenCode plugin checked against actual SDK {sdk_version}")
+        else:
+            print("OpenCode plugin stub-only smoke check; SDK compatibility NOT verified")
         compiled = output_dir / "awoki-continuity.js"
         if not compiled.is_file():
             raise SystemExit(f"TypeScript compiler did not produce {compiled}")
+        (output_dir / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
 
         node = shutil.which("node")
         if node:
             script = f'''
-const plugin = require({json.dumps(str(compiled))});
+const plugin = await import({json.dumps(compiled.as_uri())});
 (async () => {{
   const hooks = await plugin.AwokiContinuity({{
     client: {{ app: {{ log: async () => {{}} }} }},
@@ -99,7 +124,7 @@ const plugin = require({json.dumps(str(compiled))});
   process.exit(1);
 }});
 '''
-            subprocess.run([node, "--eval", script], cwd=ROOT, check=True)
+            subprocess.run([node, "--input-type=module", "--eval", script], cwd=ROOT, check=True)
             print("OpenCode continuity plugin compile and session-hook runtime check ok")
         else:
             print("OpenCode continuity plugin static compile ok; Node unavailable for hook runtime check")

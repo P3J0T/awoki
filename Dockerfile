@@ -87,9 +87,10 @@ RUN apt-get update \
     && if command -v fdfind >/dev/null 2>&1; then ln -sf "$(command -v fdfind)" /usr/local/bin/fd; fi \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /tmp/requirements.txt
-RUN python -m pip install --upgrade pip setuptools wheel \
-    && pip install -r /tmp/requirements.txt
+COPY requirements.txt requirements.lock /tmp/
+RUN python -m pip install -r /tmp/requirements.txt -c /tmp/requirements.lock \
+    && python -m pip check \
+    && python -m pip freeze > /usr/local/share/awoki-python-resolved.txt
 
 COPY . /awoki
 RUN chmod +x /awoki/.harness/bin/code-parser-check /awoki/.harness/bin/code-search-eval-check \

@@ -16,43 +16,7 @@ def validate_json(path: Path) -> None:
     json.loads(path.read_text(encoding="utf-8"))
 
 
-def _strip_jsonc(text: str) -> str:
-    out = []
-    i = 0
-    in_str = False
-    esc = False
-    while i < len(text):
-        c = text[i]
-        n = text[i + 1] if i + 1 < len(text) else ""
-        if in_str:
-            out.append(c)
-            if esc:
-                esc = False
-            elif c == "\\":
-                esc = True
-            elif c == "\"":
-                in_str = False
-            i += 1
-            continue
-        if c == "\"":
-            in_str = True
-            out.append(c)
-            i += 1
-            continue
-        if c == "/" and n == "/":
-            i += 2
-            while i < len(text) and text[i] not in "\r\n":
-                i += 1
-            continue
-        if c == "/" and n == "*":
-            i += 2
-            while i + 1 < len(text) and not (text[i] == "*" and text[i + 1] == "/"):
-                i += 1
-            i += 2
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+from jsonc import strip_jsonc as _strip_jsonc
 
 
 def validate_jsonc(path: Path) -> None:

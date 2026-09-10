@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: doctor continuity-doctor dependencies-check dev-preflight install-interactive init layout require-init maintenance-check validate validate-runtime code-search-eval code-search-eval-runtime install install-opencode-ssh opencode-ssh opencode-recreate docker-build docker-up docker-down docker-smoke opencode-ssh-build opencode-ssh-up opencode-ssh-down opencode-ssh-shell opencode-ssh-client-check opencode-web-password ai-config-compile ai-configure ai-model-add ai-key-update opencode-user-config-check opencode-config-reload opencode-auth opencode-runtime-check runtime-config embedding-benchmark reranker-benchmark mcp-local mcp-docker mcp-auto index index-local index-vector index-vector-local burp-status burp-tools burp-validate backup-portable backup-full backup-verify backup-inspect restore test clean package
+.PHONY: doctor continuity-doctor dependencies-check dev-preflight install-interactive init layout require-init maintenance-check validate validate-runtime code-search-eval code-search-eval-runtime install install-opencode-ssh opencode-ssh opencode-recreate docker-build docker-up docker-down docker-smoke opencode-ssh-build opencode-ssh-up opencode-ssh-down opencode-ssh-shell opencode-ssh-client-check opencode-web-password ai-config-compile ai-configure ai-model-add ai-key-update ai-config-test opencode-user-config-check opencode-config-reload opencode-auth opencode-runtime-check runtime-config embedding-benchmark reranker-benchmark mcp-local mcp-docker mcp-auto index index-local index-vector index-vector-local burp-status burp-tools burp-validate backup-portable backup-full backup-verify backup-inspect restore test clean package
 
 BACKUP_DIR ?= ../awoki-backups
 BACKUP ?=
@@ -169,23 +169,30 @@ opencode-web-password:
 ai-config-compile:
 	@.harness/bin/awoki-ai-configure $(AI_CONFIG_ARGS)
 
-ai-configure: ai-config-compile
-	@$(MAKE) opencode-config-reload
+ai-configure:
+	@.harness/bin/awoki-ai-configure --reload $(AI_CONFIG_ARGS)
 
 ai-model-add:
-	@.harness/bin/awoki-ai-configure --add-chat-model $(AI_MODEL_ARGS)
-	@$(MAKE) opencode-config-reload
+	@.harness/bin/awoki-ai-configure --add-chat-model --reload $(AI_MODEL_ARGS)
 
 ai-key-update:
 	@.harness/bin/awoki-ai-key-update
+
+ai-config-test:
+	@$(PYTHON) .harness/provider_contract_probe.py
 
 opencode-user-config-check:
 	@.harness/bin/opencode-user-config-check
 
 opencode-config-reload: opencode-user-config-check
-	@if ! docker compose -f docker-compose.opencode.yml ps -q awoki-opencode-ssh 2>/dev/null | grep -q .; then \
+	@set -eu; runtime_ids="$$(docker compose -f docker-compose.opencode.yml ps -q awoki-opencode-ssh 2>/dev/null)" || { \
+		echo "[awoki] cannot query Docker runtime state; reload is not confirmed." >&2; exit 2; }; \
+	if [ -z "$$runtime_ids" ]; then \
 		echo "[awoki] OpenCode user config is valid; runtime is not running, so the next start will load it."; \
 	else \
+		docker compose -f docker-compose.opencode.yml exec -T -u op \
+			-e HOME=/home/op -e OPENCODE_CONFIG_DIR=/awoki/.opencode \
+			awoki-opencode-ssh opencode debug config >/dev/null; \
 		echo "[awoki] restarting OpenCode SSH/Web service to reload user provider/model configuration..."; \
 		docker compose -f docker-compose.opencode.yml restart awoki-opencode-ssh; \
 		.harness/bin/run-opencode-ssh; \

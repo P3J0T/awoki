@@ -359,6 +359,8 @@ make opencode-recreate \
 
 Safe mode is operator-selected. Awoki does not pretend that a version is “known good” merely because it built successfully.
 
+Python builds use reviewed exact constraints; see [dependency updates and compatibility checks](docs/DEPENDENCY_UPDATES.md). This does not change the OpenCode latest/safe policy.
+
 ## Configure retrieval
 
 For one OpenAI-compatible service that supplies chat, embeddings, and reranking,
@@ -394,10 +396,48 @@ To rotate only that shared key later, use the hidden-input shortcut:
 make ai-key-update
 ```
 
-It preserves the endpoint/model/context settings, regenerates the two local
-configuration files, validates them, and reloads or recreates the running service
-as required. The key is never passed as a command argument. Chat, embeddings, and
-reranking all begin using the new value after the reload.
+It changes only the stored shared key in `.env`; OpenCode JSONC is left byte-for-byte
+unchanged. Endpoint/model/context settings and disabled reranking stay unchanged.
+It validates the managed shared-key configuration and reloads or recreates the
+running service as required. The key is never passed as a command argument. An
+existing separate reranker credential requires an explicit shared-profile setup
+first; key rotation will not silently replace it.
+
+The interactive installer uses this same configurator, including context/output
+limits (positive integer token counts; output cannot exceed context). Both raw
+`Authorization` and custom-header names are supported case-insensitively.
+
+Preview changes without writing files or restarting services:
+
+```bash
+make ai-config-compile AI_CONFIG_ARGS="--dry-run"
+```
+
+Automatically derived reranker URLs follow shared base-URL changes; explicitly
+configured separate URLs remain separate and produce a warning. Changing an
+embedding model resets its default deployment identity to that model unless an
+explicit deployment ID is supplied. Verify the served revision and dimensions
+before reindexing: configuration updates do not migrate existing Qdrant vectors.
+Use `--no-reranker` or `--enable-reranker` to change reranking explicitly.
+
+Configuration writes are staged before replacement, serialized between compiler
+processes, and rolled back on a write/reload error. A failed reload also attempts
+to restore the previous runtime configuration. If recovery fails, the command
+reports failure rather than claiming success. This handles reported errors, not
+power loss or forced process termination between filesystem operations.
+
+Run the offline authentication/request-contract matrix in a development environment
+with Awoki's Python requirements installed:
+
+```bash
+make ai-config-test
+```
+
+It uses a loopback Python server, synthetic documents and synthetic keys. It checks
+Bearer, raw Authorization (including lowercase spelling), and custom-header modes
+for all three request shapes. Embeddings and reranking use the real Awoki clients;
+chat checks the compiled OpenCode options using an HTTP probe. It does **not**
+validate your real API key, model quality, connectivity, or a full OpenCode agent run.
 
 The generated provider uses OpenCode's standard `provider.<id>.models` map. Add
 or update another chat model on the same endpoint without re-entering URLs or the

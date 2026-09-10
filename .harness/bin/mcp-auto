@@ -50,7 +50,9 @@ MODE="${AWOKI_MODE:-${HARNESS_MODE:-}}"
 # per-MCP config environment, so restore the entrypoint snapshot above and then
 # normalize container-only paths here.
 if [[ "$MODE" == "container-opencode" ]] || [[ -f /.dockerenv ]]; then
-  if [[ -d /awoki/.harness ]]; then
+  # An explicit snapshot override also selects a deliberate non-default layout
+  # (including hermetic tests). Keep normal appliance launches pinned to /awoki.
+  if [[ -z "$runtime_env_override" && -d /awoki/.harness ]]; then
     ROOT=/awoki
     cd "$ROOT"
   fi

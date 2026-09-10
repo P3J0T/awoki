@@ -14,11 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from provider_auth import provider_auth_headers, provider_auth_settings
+from provider_auth import provider_auth_headers, provider_auth_settings, provider_error_summary
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{2,}")
 DEFAULT_VECTOR_SIZE = 768
-DEFAULT_EMBEDDING_MODEL = "text-embeddings-inference"
+DEFAULT_EMBEDDING_MODEL = "jina-code-embeddings"
 DEFAULT_RERANK_MODEL = ""
 _LAST_EMBEDDING_ERROR = ""
 _LAST_RERANK_ERROR = ""
@@ -334,8 +334,8 @@ def embed_texts(texts: Sequence[str], *, is_query: bool = False) -> list[list[fl
         _LAST_EMBEDDING_ERROR = ""
         return vectors
     except Exception as exc:
-        _LAST_EMBEDDING_ERROR = str(exc)[:1000]
-        raise
+        _LAST_EMBEDDING_ERROR = provider_error_summary(exc)
+        raise RuntimeError(_LAST_EMBEDDING_ERROR) from None
 
 
 def embed_query(query: str) -> list[float]:
@@ -784,7 +784,7 @@ def probe_retrieval(
                         "network": True,
                     }
                 except Exception as exc:
-                    _LAST_EMBEDDING_ERROR = str(exc)[:1000]
+                    _LAST_EMBEDDING_ERROR = provider_error_summary(exc)
                     result["embedding"] = {
                         "status": "degraded",
                         "provider": cfg.provider,
@@ -826,7 +826,7 @@ def probe_retrieval(
                         "network": True,
                     }
                 except Exception as exc:
-                    _LAST_RERANK_ERROR = str(exc)[:1000]
+                    _LAST_RERANK_ERROR = provider_error_summary(exc)
                     result["rerank"] = {
                         "status": "degraded",
                         "provider": profile.get("provider"),
@@ -1318,11 +1318,11 @@ def rerank_hits(
         reranked.extend(dict(item) for item in hits[candidate_limit:])
         return reranked[: max(1, min(int(limit), 50))]
     except Exception as exc:
-        _LAST_RERANK_ERROR = str(exc)[:1000]
+        _LAST_RERANK_ERROR = provider_error_summary(exc)
         if str(profile.get("fail_mode")) == "error":
-            raise
+            raise RuntimeError(_LAST_RERANK_ERROR) from None
         out = [dict(h) for h in hits[:limit]]
         for h in out:
-            h["rerank_error"] = str(exc)
+            h["rerank_error"] = provider_error_summary(exc)
             h["rerank_fallback"] = True
         return out

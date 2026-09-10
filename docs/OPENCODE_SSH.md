@@ -215,9 +215,15 @@ Awoki's server uses the MCP Python SDK 1.x `FastMCP` API. `requirements.txt` and
 
 ## Remote embeddings and reranking
 
-Configure endpoint variables in `.env`. No local model cache is mounted or downloaded. Qdrant remains the semantic vector store.
+Use `make ai-configure` for the guided custom-provider setup; the interactive
+installer uses the same compiler. Its fresh embedding model default is
+`jina-code-embeddings`. No local model cache is downloaded; Qdrant remains the
+semantic store.
 
-Example embedding values:
+The following is an explicit **legacy native-TEI example**, not the current
+custom-provider default. Preserve such settings on upgrades if your server still
+uses this API label:
+
 
 ```env
 AWOKI_EMBEDDING_PROVIDER=openai

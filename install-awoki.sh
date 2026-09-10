@@ -462,40 +462,11 @@ configure_env_interactive() {
     env_set AWOKI_OPENCODE_WEB_ENABLED 0
   fi
 
-  local embedding_current embedding_default
-  embedding_current="$(env_get AWOKI_EMBEDDING_BASE_URL '')"
-  [[ -n "$embedding_current" ]] && embedding_default=yes || embedding_default=no
-  if prompt_yes_no "Configure remote/OpenAI-compatible embeddings now?" "$embedding_default"; then
-    value="$(prompt_value "Embedding base URL" "$embedding_current")"
-    env_set AWOKI_EMBEDDING_BASE_URL "$value"
-    value="$(prompt_value "Embedding deployment/model identity" "$(env_get AWOKI_EMBEDDING_DEPLOYMENT_ID jinaai/jina-embeddings-v2-base-code)")"
-    env_set AWOKI_EMBEDDING_DEPLOYMENT_ID "$value"
-    value="$(prompt_value "Embedding vector size" "$(env_get AWOKI_VECTOR_SIZE 768)")"
-    [[ "$value" =~ ^[0-9]+$ ]] || { echo "[awoki] invalid vector size" >&2; exit 2; }
-    env_set AWOKI_VECTOR_SIZE "$value"
-    local old_key new_key
-    old_key="$(env_get AWOKI_EMBEDDING_API_KEY '')"
-    new_key="$(prompt_secret "Embedding API key" "$([[ -n "$old_key" ]] && echo 1 || echo 0)")"
-    if [[ "$new_key" == "-" ]]; then old_key=""; elif [[ -n "$new_key" ]]; then old_key="$new_key"; fi
-    env_set AWOKI_EMBEDDING_API_KEY "$old_key"
-  fi
-
-  local rerank_current rerank_default
-  rerank_current="$(env_get AWOKI_RERANK_ENABLED 0)"
-  case "$rerank_current" in 1|true|TRUE|yes|YES|on|ON) rerank_default=yes ;; *) rerank_default=no ;; esac
-  if prompt_yes_no "Enable/configure the optional reranker?" "$rerank_default"; then
-    env_set AWOKI_RERANK_ENABLED 1
-    value="$(prompt_value "Reranker URL" "$(env_get AWOKI_RERANK_URL '')")"
-    env_set AWOKI_RERANK_URL "$value"
-    value="$(prompt_value "Reranker provider" "$(env_get AWOKI_RERANK_PROVIDER tei)")"
-    env_set AWOKI_RERANK_PROVIDER "$value"
-    local old_rkey new_rkey
-    old_rkey="$(env_get AWOKI_RERANK_API_KEY '')"
-    new_rkey="$(prompt_secret "Reranker API key" "$([[ -n "$old_rkey" ]] && echo 1 || echo 0)")"
-    if [[ "$new_rkey" == "-" ]]; then old_rkey=""; elif [[ -n "$new_rkey" ]]; then old_rkey="$new_rkey"; fi
-    env_set AWOKI_RERANK_API_KEY "$old_rkey"
-  else
-    env_set AWOKI_RERANK_ENABLED 0
+  local custom_default=no
+  [[ -n "$(env_get AWOKI_EMBEDDING_BASE_URL '')" ]] && custom_default=yes
+  if prompt_yes_no "Configure a custom provider for chat, embeddings and optional reranking?" "$custom_default"; then
+    AWOKI_ROOT="$ROOT" AWOKI_ENV_FILE="$ENV_FILE" AWOKI_OPENCODE_USER_CONFIG="$OPENCODE_USER_CONFIG" \
+      "$ROOT/.harness/bin/awoki-ai-configure"
   fi
 
   if prompt_yes_no "Review/edit .env manually before continuing?" no; then
@@ -541,7 +512,8 @@ prebuild_review_gate() {
     show_prebuild_review "$baseline"
     echo
     echo "Nothing below builds Docker until you explicitly choose option 5."
-    echo "  1) Edit OpenCode user/provider config (safe place to paste custom provider/model config)"
+    echo "  1) Configure custom provider/models (guided, no JSON editing)"
+    echo "  7) Edit OpenCode user config (advanced / native provider settings)"
     echo "  2) Edit .env, then re-run static validation"
     echo "  3) Edit Awoki project opencode.jsonc (advanced/source-level config)"
     echo "  4) Re-run static validation without editing"
@@ -551,7 +523,8 @@ prebuild_review_gate() {
     IFS= read -r choice || choice=""
     choice="${choice:-1}"
     case "$choice" in
-      1) ensure_opencode_user_config; open_editor "$OPENCODE_USER_CONFIG" || true; run_static_preflight ;;
+      1) AWOKI_ROOT="$ROOT" AWOKI_ENV_FILE="$ENV_FILE" AWOKI_OPENCODE_USER_CONFIG="$OPENCODE_USER_CONFIG" "$ROOT/.harness/bin/awoki-ai-configure"; run_static_preflight ;;
+      7) ensure_opencode_user_config; open_editor "$OPENCODE_USER_CONFIG" || true; run_static_preflight ;;
       2) open_editor "$ENV_FILE"; run_static_preflight ;;
       3)
         echo "[awoki] advanced: this tracked file is baked into the Awoki image."

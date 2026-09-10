@@ -136,29 +136,34 @@ def _candidate_object(root: Path, project_id: str, reference_id: str) -> dict[st
             if isinstance(row, dict) and str(row.get("candidate_id") or "") == reference_id:
                 representative = representative or dict(row)
                 scope_identity = dict(meta.get("scope_identity") or scope_identity)
-                try:
-                    artifact_mtime_ns = int(path.stat().st_mtime_ns)
-                except OSError:
-                    artifact_mtime_ns = 0
                 occurrences.append({
                     "evidence_ref": evidence_ref,
                     "observed_at": str(meta.get("created_at") or ""),
-                    "artifact_mtime_ns": artifact_mtime_ns,
+                    "created_at_ns": int(meta.get("created_at_ns") or 0),
                     "capture_run_ids": list(meta.get("capture_run_ids") or []),
                 })
                 break
     if not representative:
         return None
     occurrences.sort(key=lambda row: (
-        str(row.get("observed_at") or ""), int(row.get("artifact_mtime_ns") or 0), str(row.get("evidence_ref") or "")
+        str(row.get("observed_at") or ""), int(row.get("created_at_ns") or 0), str(row.get("evidence_ref") or "")
     ))
+    # Filesystem mtimes are not capture provenance and change on copy/restore.
+    # Legacy artifacts may have only millisecond timestamps: report a tie as
+    # unknown instead of manufacturing chronology from their content hashes.
+    earliest = [row for row in occurrences if row["observed_at"] == occurrences[0]["observed_at"]]
+    ambiguous = len(earliest) > 1 and (
+        any(not row["created_at_ns"] for row in earliest)
+        or earliest[0]["created_at_ns"] == earliest[1]["created_at_ns"]
+    )
     return {
         "row": representative,
         "scope_identity": scope_identity,
-        "first_materialized_in": str((occurrences[0] if occurrences else {}).get("evidence_ref") or ""),
+        "first_materialized_in": "" if ambiguous else occurrences[0]["evidence_ref"],
+        "first_materialization_ambiguous": ambiguous,
         "observed_in": [str(row.get("evidence_ref") or "") for row in occurrences[:MAX_LINKS]],
         "occurrences": [
-            {key: value for key, value in row.items() if key != "artifact_mtime_ns"}
+            dict(row)
             for row in occurrences[:MAX_LINKS]
         ],
         "occurrence_total": len(occurrences),
@@ -267,6 +272,7 @@ def _base_description(root: Path, project_id: str, reference_id: str, *, session
                 "why_saved": "Typed candidate identity preserved across captured retrieval evidence; occurrence provenance distinguishes first materialization from later observations without changing cand_ identity.",
                 "origin": {
                     "first_materialized_in": first_materialized,
+                    "first_materialization_ambiguous": bool(found.get("first_materialization_ambiguous")),
                     "observed_in": observed_in,
                     "occurrence_count": int(found.get("occurrence_total") or len(found.get("occurrences") or [])),
                     "occurrence_scan_truncated": bool(found.get("occurrence_scan_truncated")),

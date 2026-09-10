@@ -236,7 +236,7 @@ def _nonsecret_config(root: Path) -> dict[str, str]:
         "AWOKI_OPENCODE_WEB_PORT": "4096",
         "AWOKI_OPENCODE_WEB_USERNAME": "opencode",
         "AWOKI_EMBEDDING_PROVIDER": "openai",
-        "AWOKI_EMBEDDING_MODEL": "text-embeddings-inference",
+        "AWOKI_EMBEDDING_MODEL": "jina-code-embeddings",
         "AWOKI_EMBEDDING_DEPLOYMENT_ID": "",
         "AWOKI_EMBEDDING_NORMALIZE": "1",
         "AWOKI_VECTOR_SIZE": "768",

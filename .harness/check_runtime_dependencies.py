@@ -105,6 +105,24 @@ def main() -> int:
     if requirements != list(lock.get("python_requirements") or []):
         fail("requirements.txt does not exactly match runtime-dependencies.lock.json")
 
+    constraints = ROOT / str(lock.get("python_constraints_source", "requirements.lock"))
+    pins = {}
+    for line in constraints.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+==[A-Za-z0-9_.+-]+", line.strip()):
+            fail("Python constraints must contain only exact package versions")
+        package, version = line.strip().split("==")
+        pins[package.lower().replace("_", "-")] = version
+    for requirement in requirements:
+        package = re.split(r"[<>=!~\\[]", requirement, maxsplit=1)[0].strip().lower().replace("_", "-")
+        if package not in pins:
+            fail(f"missing exact Python constraint for {package}")
+    for filename in ("Dockerfile", "Dockerfile.opencode"):
+        build = (ROOT / filename).read_text(encoding="utf-8")
+        if "-c /tmp/requirements.lock" not in build or "pip freeze" not in build:
+            fail(f"{filename} must use constraints and record resolved Python versions")
+
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     for requirement in requirements:
         package = re.split(r"[<>=!~\[]", requirement, maxsplit=1)[0].strip()

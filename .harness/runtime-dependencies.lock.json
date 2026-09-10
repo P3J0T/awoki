@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "updated_at": "2026-08-19",
+  "updated_at": "2026-09-10",
   "update_policy": "OpenCode resolves at image build according to the selected latest|safe policy; the resolved CLI/plugin/SDK versions are recorded inside the immutable image. Other critical runtime defaults remain reviewed here.",
   "critical_runtime": {
     "opencode_cli": {
@@ -90,5 +90,8 @@
     "tree-sitter-embedded-template==0.25.0",
     "tree-sitter-yaml==0.7.2"
   ],
-  "system_package_policy": "The Dockerfiles are authoritative for direct Debian package names. Exact Debian package versions and pip bootstrap tooling are inherited from the recorded base-image lines rather than silently treated as Awoki API compatibility pins."
+  "system_package_policy": "The Dockerfiles are authoritative for direct Debian package names. Exact Debian package versions and pip bootstrap tooling are inherited from the recorded base-image lines rather than silently treated as Awoki API compatibility pins.",
+  "python_constraints_source": "requirements.lock",
+  "python_constraints_policy": "Exact direct/transitive versions from the tested Python 3.12 Linux runtime; deliberate reviewed regeneration. Python/platform-specific wheel hashes and base image digests are not pinned.",
+  "python_resolved_record": "/usr/local/share/awoki-python-resolved.txt"
 }

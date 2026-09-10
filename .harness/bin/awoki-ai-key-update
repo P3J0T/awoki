@@ -23,11 +23,10 @@ if [[ -t 0 ]]; then
   IFS= read -r -s new_key
   printf '\n' >&2
   [[ -n "$new_key" ]] || { echo "[awoki] API key cannot be empty" >&2; exit 2; }
-  printf '%s\n' "$new_key" | "$CONFIGURATOR" --non-interactive --api-key-stdin
+  printf '%s\n' "$new_key" | "$CONFIGURATOR" --non-interactive --key-only --api-key-stdin --reload
   unset new_key
 else
-  "$CONFIGURATOR" --non-interactive --api-key-stdin
+  "$CONFIGURATOR" --non-interactive --key-only --api-key-stdin --reload
 fi
 
-make -C "$ROOT" opencode-config-reload
 echo "[awoki] shared AI API key updated for chat, embeddings, and reranking."

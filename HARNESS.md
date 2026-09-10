@@ -188,26 +188,26 @@ Awoki combines:
 4. weighted reciprocal-rank fusion;
 5. optional remote HTTP reranking.
 
-Default configuration:
+Fresh-install example configuration (use `make ai-configure`; preserve existing collection settings on upgrades):
 
 ```text
 AWOKI_EMBEDDING_PROVIDER=openai
-AWOKI_EMBEDDING_MODEL=text-embeddings-inference
-AWOKI_EMBEDDING_DEPLOYMENT_ID=jinaai/jina-embeddings-v2-base-code
+AWOKI_EMBEDDING_MODEL=jina-code-embeddings
+AWOKI_EMBEDDING_DEPLOYMENT_ID=jina-code-embeddings
 AWOKI_EMBEDDING_BASE_URL=http://embedding.example.invalid:8000/v1
 AWOKI_EMBEDDING_BATCH_SIZE=32
 AWOKI_EMBEDDING_NORMALIZE=1
 AWOKI_VECTOR_SIZE=768
 AWOKI_QDRANT_URL=http://qdrant:6333
-AWOKI_QDRANT_COLLECTION=awoki_jina_embeddings_v2_base_code_768
+AWOKI_QDRANT_COLLECTION=awoki_jina_code_embeddings_768
 AWOKI_QDRANT_RECREATE_ON_DIM_MISMATCH=0
 AWOKI_RERANK_ENABLED=0
 ```
 
-The example TEI deployment fixes the real model as
-`jinaai/jina-embeddings-v2-base-code`; `text-embeddings-inference` is the model
-field sent to its OpenAI-compatible endpoint. Reranking can be enabled
-independently with `AWOKI_RERANK_PROVIDER=tei`,
+The custom endpoint must serve the configured request model. Declare the actual
+served revision in the deployment identity and verify vector dimensions; changing
+configuration does not migrate vectors. The guided custom provider uses HTTP
+reranking with `bge-reranker`. Native TEI can instead be enabled independently with `AWOKI_RERANK_PROVIDER=tei`,
 `AWOKI_RERANK_URL=http://reranker.example.invalid:8000/rerank`, and an empty
 `AWOKI_RERANK_MODEL`. A reranker failure defaults to the existing fused order.
 

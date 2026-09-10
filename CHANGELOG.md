@@ -17,6 +17,16 @@
 - Prints absolute host SSH key paths in post-install commands so copied connection commands do not depend on the current working directory.
 - Uses checkout-local `.ssh-container/known_hosts` in verifier and printed/manual SSH commands, so installing/replacing Awoki never requires clearing the operator's global `~/.ssh/known_hosts`.
 
+### Configuration safety and verification
+
+- Makes shared-key rotation credential-only and model addition model-only; preserves disabled reranking, native TEI settings, other models, and unrelated provider configuration.
+- Routes the installer through the shared configurator, follows derived reranker URLs when the base URL changes, preserves provider models/default references on rename, and consistently uses the served `jina-code-embeddings` fresh default.
+- Normalizes Authorization header casing, removes stale case variants, and withholds provider error bodies from retrieval status, raised embedding errors, and reranker fallback results.
+- Adds redacted configuration previews, private staged writes, write/reload rollback, pre-restart configuration checks, and one JSONC parser with trailing-comma support.
+- Stores high-resolution evidence capture timestamps independent of filesystem mtimes; tied legacy timestamps report ambiguous first materialization instead of inventing chronology.
+- Adds offline provider request-contract checks, configuration transition regressions, real OpenCode SDK type/session-hook validation in CI, and reviewed Python dependency constraints with resolved build inventories.
+- Honors an explicit runtime-snapshot layout override in the MCP launcher, while preserving the normal appliance path for default launches.
+
 Public releases use semantic versioning. The historical `R9.1.6.x` entries below are the internal pre-v0.1.0 development/stabilization line.
 
 ## v0.1.7 — Qdrant non-interactive readiness correction

@@ -1,6 +1,8 @@
 # Remote Retrieval, Sensitive Memory, and Reliability Implementation
 
-This checklist records the implementation agreed for Awoki.
+This historical checklist records the original remote-TEI implementation. Its
+model labels are not current setup defaults; use `make ai-configure` and the
+current `.env.example` for new custom-provider installations.
 
 ## Retrieval
 

@@ -158,22 +158,22 @@ Reranking is independently optional. With `AWOKI_RERANK_ENABLED=0`, Awoki return
 
 ```env
 AWOKI_EMBEDDING_PROVIDER=openai
-AWOKI_EMBEDDING_MODEL=text-embeddings-inference
-AWOKI_EMBEDDING_DEPLOYMENT_ID=jinaai/jina-embeddings-v2-base-code
+AWOKI_EMBEDDING_MODEL=jina-code-embeddings
+AWOKI_EMBEDDING_DEPLOYMENT_ID=jina-code-embeddings
 AWOKI_EMBEDDING_BASE_URL=http://embedding.example.invalid:8000/v1
 AWOKI_EMBEDDING_API_KEY=
 AWOKI_EMBEDDING_BATCH_SIZE=32
 AWOKI_EMBEDDING_NORMALIZE=1
 AWOKI_VECTOR_SIZE=768
 AWOKI_QDRANT_URL=http://qdrant:6333
-AWOKI_QDRANT_COLLECTION=awoki_jina_embeddings_v2_base_code_768
+AWOKI_QDRANT_COLLECTION=awoki_jina_code_embeddings_768
 AWOKI_QDRANT_RECREATE_ON_DIM_MISMATCH=0
 ```
 
-A TEI deployment selects the actual model with
-`--model-id jinaai/jina-embeddings-v2-base-code`. The OpenAI-compatible request
-uses `text-embeddings-inference` as its model field. The returned vectors are
-768-dimensional. A new model or vector dimension must use a new collection or
+Use the shared configurator for these fresh-install defaults. The endpoint must
+serve `jina-code-embeddings`; verify its actual revision and configured 768-vector
+size instead of inferring them from an alias. Existing profiles and collection
+names remain operator-owned. A new model or vector dimension must use a new collection or
 an explicitly authorized rebuild; automatic destructive recreation is disabled
 by default.
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -267,6 +268,7 @@ def put(
         "schema": SCHEMA,
         "evidence_ref": evidence_ref,
         "created_at": _now(),
+        "created_at_ns": time.time_ns(),
         "kind": normalized["kind"],
         "tool": normalized["tool"],
         "project_id": normalized["project_id"],
@@ -364,6 +366,7 @@ def metadata(root: Path, project_id: str, evidence_ref: str) -> dict[str, Any]:
         "artifact_sha256": value.get("artifact_sha256"),
         "payload_sha256": value.get("payload_sha256"),
         "created_at": value.get("created_at"),
+        "created_at_ns": value.get("created_at_ns"),
         "candidate_index": value.get("candidate_index") or [],
         "candidate_count": len(value.get("candidate_index") or []),
         "backend_observations": _backend_observations(value.get("payload")),

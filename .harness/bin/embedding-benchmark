@@ -148,7 +148,7 @@ def main() -> int:
         parser.error("--single-only and --bulk-only are mutually exclusive")
 
     provider = (os.environ.get("AWOKI_EMBEDDING_PROVIDER") or "openai").strip().lower()
-    model = (os.environ.get("AWOKI_EMBEDDING_MODEL") or "text-embeddings-inference").strip()
+    model = (os.environ.get("AWOKI_EMBEDDING_MODEL") or "jina-code-embeddings").strip()
     base_url = (os.environ.get("AWOKI_EMBEDDING_BASE_URL") or "").strip()
     configured_api_key = (os.environ.get("AWOKI_EMBEDDING_API_KEY") or "").strip()
     api_key = configured_api_key or "awoki-local-endpoint"

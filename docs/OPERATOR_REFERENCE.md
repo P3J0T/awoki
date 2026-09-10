@@ -739,7 +739,9 @@ parser-native symbol identity without per-language target aliases.
 
 ## Example remote embedding configuration
 
-The bundled example profile assumes:
+This is a legacy native-TEI example, not the current generated custom-provider
+profile. Use `make ai-configure` for the current `jina-code-embeddings` default.
+The explicit TEI example below assumes:
 
 ```text
 TEI model: jinaai/jina-embeddings-v2-base-code

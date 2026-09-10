@@ -162,9 +162,10 @@ RUN install -d -m 1777 /tmp \
          echo 'AuthorizedKeysFile /home/op/.ssh/authorized_keys'; \
        } >>/etc/ssh/sshd_config
 
-COPY requirements.txt /tmp/requirements.txt
-RUN python -m pip install --upgrade pip setuptools wheel \
-    && pip install -r /tmp/requirements.txt
+COPY requirements.txt requirements.lock /tmp/
+RUN python -m pip install -r /tmp/requirements.txt -c /tmp/requirements.lock \
+    && python -m pip check \
+    && python -m pip freeze > /usr/local/share/awoki-python-resolved.txt
 
 COPY . /awoki
 COPY .harness/bin/opencode-ssh-entrypoint /usr/local/bin/opencode-ssh-entrypoint

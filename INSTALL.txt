@@ -411,6 +411,31 @@ The prompt is hidden. It preserves all model, URL, context, and output settings,
 then validates and reloads/recreates the running service automatically. The one
 new raw key is used by chat, embeddings, and reranking.
 
+Key rotation edits only the shared key in .env, leaves OpenCode JSONC unchanged,
+and preserves disabled reranking. A separately configured reranker credential is
+not overwritten silently. The installer now calls this same guided configurator;
+its context/output prompts show defaults and require positive integer token counts.
+Output may not exceed context.
+
+Preview without writes/restarts:
+
+  make ai-config-compile AI_CONFIG_ARGS="--dry-run"
+
+Explicitly disable/enable reranking with --no-reranker / --enable-reranker.
+Auto-derived reranker URLs follow base-URL changes; separate URLs are preserved
+with a warning. Changing the embedding model updates its default deployment ID.
+Check revision/dimensions before reindexing; existing Qdrant data is not migrated.
+
+Write/reload failures restore previous files and attempt runtime recovery. A
+failed recovery is reported as failure. This is not a power-loss-safe transaction.
+
+Offline structure check (requires installed Python dependencies):
+
+  make ai-config-test
+
+Uses loopback and synthetic keys/data only: real Awoki embedding/reranking clients
+and a config-derived chat HTTP probe. Not real key validation or an OpenCode agent run.
+
 Add multiple chat models to the same normal OpenCode provider definition:
 
   make ai-model-add

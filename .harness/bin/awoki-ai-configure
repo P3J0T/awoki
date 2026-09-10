@@ -4,17 +4,23 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import getpass
 import json
 import os
 from pathlib import Path
 import re
-import stat
+import subprocess
 import sys
 import tempfile
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from jsonc import strip_jsonc as _strip_jsonc, validate_provider_config
+from provider_auth import provider_auth_settings
 
 ENV_KEY_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -76,87 +82,12 @@ def _update_env_text(text: str, updates: dict[str, str]) -> str:
     return "\n".join(result) + "\n"
 
 
-def _strip_jsonc(text: str) -> str:
-    without_comments: list[str] = []
-    index = 0
-    in_string = False
-    escaped = False
-    while index < len(text):
-        char = text[index]
-        following = text[index + 1] if index + 1 < len(text) else ""
-        if in_string:
-            without_comments.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            index += 1
-            continue
-        if char == '"':
-            in_string = True
-            without_comments.append(char)
-            index += 1
-            continue
-        if char == "/" and following == "/":
-            index += 2
-            while index < len(text) and text[index] not in "\r\n":
-                index += 1
-            continue
-        if char == "/" and following == "*":
-            index += 2
-            while index + 1 < len(text) and not (
-                text[index] == "*" and text[index + 1] == "/"
-            ):
-                index += 1
-            if index + 1 >= len(text):
-                raise ConfigurationError("unterminated block comment in OpenCode JSONC")
-            index += 2
-            continue
-        without_comments.append(char)
-        index += 1
-
-    stripped = "".join(without_comments)
-    clean: list[str] = []
-    index = 0
-    in_string = False
-    escaped = False
-    while index < len(stripped):
-        char = stripped[index]
-        if in_string:
-            clean.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            index += 1
-            continue
-        if char == '"':
-            in_string = True
-            clean.append(char)
-            index += 1
-            continue
-        if char == ",":
-            following = index + 1
-            while following < len(stripped) and stripped[following].isspace():
-                following += 1
-            if following < len(stripped) and stripped[following] in "}]":
-                index += 1
-                continue
-        clean.append(char)
-        index += 1
-    return "".join(clean)
-
-
 def _read_jsonc(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"$schema": "https://opencode.ai/config.json"}
     try:
         value = json.loads(_strip_jsonc(path.read_text(encoding="utf-8")))
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
         raise ConfigurationError(f"invalid existing OpenCode JSONC: {exc}") from exc
     if not isinstance(value, dict):
         raise ConfigurationError("existing OpenCode configuration must be an object")
@@ -232,6 +163,142 @@ def _atomic_write(path: Path, text: str, mode: int) -> None:
             pass
 
 
+@contextmanager
+def _configuration_lock(env_path: Path):
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(str(env_path) + ".ai-config.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def _preview(current: dict[str, str], updates: dict[str, str]) -> None:
+    for name, value in updates.items():
+        old = current.get(name, "")
+        if value == old:
+            continue
+        if "API_KEY" in name and not name.endswith("_ENV"):
+            print(f"{name}: [redacted] -> [redacted]")
+        else:
+            print(f"{name}: {old or '(unset)'} -> {value or '(unset)'}")
+
+
+def _reload(root: Path) -> None:
+    result = subprocess.run(
+        ["make", "-C", str(root), "opencode-config-reload"],
+        capture_output=True, text=True, timeout=180, check=False,
+    )
+    if result.returncode:
+        # Runtime tools can include provider errors. Do not print captured output
+        # from a secret-bearing child process into the terminal/model context.
+        raise ConfigurationError("OpenCode reload failed; inspect sanitized runtime diagnostics")
+
+
+def _apply_configuration(outputs: list[tuple[Path, str]], *, root: Path, reload: bool) -> None:
+    originals = {}
+    staged = []
+    replaced = []
+    try:
+        # Stage every document before replacing either one. All new files and
+        # rollback copies are private, even if the old file was world-readable.
+        for path, value in outputs:
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise ConfigurationError("refusing an unsafe configuration path")
+            originals[path] = path.read_text(encoding="utf-8") if path.exists() else None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+            temporary = Path(name)
+            staged.append((path, temporary))
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(value)
+                handle.flush()
+                os.fsync(handle.fileno())
+        for path, temporary in staged:
+            os.replace(temporary, path)
+            replaced.append(path)
+        if reload:
+            _reload(root)
+    except Exception as exc:
+        rollback_failed = False
+        for path in reversed(replaced):
+            try:
+                if originals[path] is None:
+                    path.unlink()
+                else:
+                    _atomic_write(path, originals[path], 0o600)
+            except (OSError, ValueError):
+                rollback_failed = True
+        recovered = not reload or not replaced
+        if reload and replaced and not rollback_failed:
+            try:
+                _reload(root)
+                recovered = True
+            except Exception:
+                pass
+        if rollback_failed:
+            raise ConfigurationError("apply failed and file rollback failed; manual recovery required") from None
+        if not recovered:
+            raise ConfigurationError("previous files restored, but runtime recovery failed; check service status") from None
+        reason = type(exc).__name__
+        if isinstance(exc, OSError) and exc.errno is not None:
+            reason += f" errno={exc.errno}"
+        raise ConfigurationError(f"configuration apply failed; previous files restored ({reason})") from None
+    finally:
+        for _, temporary in staged:
+            temporary.unlink(missing_ok=True)
+
+
+def _add_chat_model(args, root, env_path, config_path, env_text, current, config):
+    if args.api_key_stdin or any(getattr(args, name) is not None for name in (
+        "base_url", "embedding_model", "embedding_deployment", "vector_size",
+        "rerank_url", "rerank_model", "rerank_provider", "reranker", "auth_mode", "auth_header", "provider_name",
+    )):
+        raise ConfigurationError("--add-chat-model changes only model settings; use ai-configure for provider settings")
+    validate_provider_config(config)
+    provider_id = args.provider_id or current.get("AWOKI_OPENCODE_PROVIDER_ID", "")
+    provider = config.get("provider", {}).get(provider_id)
+    if not isinstance(provider, dict):
+        raise ConfigurationError("configure this provider before adding a model")
+    interactive = not args.non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
+    model_id = args.chat_model or os.environ.get("AWOKI_AI_CHAT_MODEL", "")
+    if interactive:
+        model_id = _prompt("Additional chat model ID", model_id)
+    if not model_id.strip():
+        raise ConfigurationError("--add-chat-model requires --chat-model or AWOKI_AI_CHAT_MODEL")
+    models = provider.setdefault("models", {})
+    if not isinstance(models, dict):
+        raise ConfigurationError("provider models must be an object")
+    model = models.get(model_id, {})
+    if not isinstance(model, dict):
+        raise ConfigurationError("model must be an object")
+    limits = model.get("limit", {})
+    if not isinstance(limits, dict):
+        raise ConfigurationError("model limit must be an object")
+    name = _choose(args.model_name, "AWOKI_AI_MODEL_NAME", model.get("name", ""), model_id)
+    context = _choose(args.context, "AWOKI_AI_CONTEXT", str(limits.get("context") or ""), "131072")
+    output = _choose(args.output, "AWOKI_AI_OUTPUT", str(limits.get("output") or ""), "8192")
+    if interactive:
+        name = _prompt("Model display name", name)
+        context = _prompt("Context limit in tokens (positive integer)", context)
+        output = _prompt("Output limit in tokens (positive integer)", output)
+    models[model_id] = {**model, "name": name, "limit": {
+        **limits, "context": _positive_int(context, "context"), "output": _positive_int(output, "output"),
+    }}
+    validate_provider_config(config)
+    updates = {}
+    if provider_id == current.get("AWOKI_OPENCODE_PROVIDER_ID"):
+        updates = {"AWOKI_OPENCODE_MODEL": model_id, "AWOKI_OPENCODE_MODEL_NAME": name,
+                   "AWOKI_OPENCODE_CONTEXT": context, "AWOKI_OPENCODE_OUTPUT": output}
+    print(f"Provider {provider_id}: add/update model {model_id}; context={context}, output={output}")
+    if not args.dry_run:
+        _apply_configuration([
+            (env_path, _update_env_text(env_text, updates)),
+            (config_path, json.dumps(config, indent=2, ensure_ascii=False) + "\n"),
+        ], root=root, reload=args.reload)
+    return 0
+
+
 def _positive_int(value: str, label: str) -> int:
     try:
         parsed = int(value)
@@ -250,6 +317,9 @@ def main() -> int:
         )
     )
     parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument("--key-only", action="store_true", help="rotate only the existing managed shared key")
+    parser.add_argument("--dry-run", action="store_true", help="preview redacted changes without writing or restarting")
+    parser.add_argument("--reload", action="store_true", help="reload after applying; restore files if reload fails")
     parser.add_argument(
         "--add-chat-model",
         action="store_true",
@@ -264,7 +334,11 @@ def main() -> int:
     parser.add_argument("--vector-size")
     parser.add_argument("--rerank-url")
     parser.add_argument("--rerank-model")
-    parser.add_argument("--no-reranker", action="store_true")
+    parser.add_argument("--rerank-provider", choices=("http", "tei"), help="http sends model/documents; tei uses the native texts API")
+    reranking = parser.add_mutually_exclusive_group()
+    reranking.add_argument("--no-reranker", dest="reranker", action="store_false")
+    reranking.add_argument("--enable-reranker", dest="reranker", action="store_true")
+    parser.set_defaults(reranker=None)
     parser.add_argument("--chat-model")
     parser.add_argument("--provider-id")
     parser.add_argument("--provider-name")
@@ -279,12 +353,58 @@ def main() -> int:
         os.environ.get("AWOKI_OPENCODE_USER_CONFIG")
         or root / ".opencode-state" / "config" / "opencode.jsonc"
     )
-    if env_path.exists() and (not env_path.is_file() or env_path.is_symlink()):
+    if args.dry_run:
+        return _configure(args, root, env_path, config_path)
+    with _configuration_lock(env_path):
+        return _configure(args, root, env_path, config_path)
+
+
+def _configure(args: argparse.Namespace, root: Path, env_path: Path, config_path: Path) -> int:
+    if env_path == config_path:
+        raise ConfigurationError(".env and OpenCode config must be different files")
+    if env_path.is_symlink() or (env_path.exists() and not env_path.is_file()):
         raise ConfigurationError(f"refusing unsafe .env path: {env_path}")
 
     env_text, current = _read_env(env_path)
     existing_config = _read_jsonc(config_path)
     existing_provider_id = current.get("AWOKI_OPENCODE_PROVIDER_ID", "")
+    if args.add_chat_model and not args.key_only:
+        return _add_chat_model(args, root, env_path, config_path, env_text, current, existing_config)
+    if args.key_only:
+        if args.add_chat_model or any(getattr(args, name) is not None for name in (
+            "base_url", "embedding_model", "embedding_deployment", "vector_size",
+            "rerank_url", "rerank_model", "rerank_provider", "reranker", "chat_model", "provider_id",
+            "provider_name", "model_name", "context", "output", "auth_mode", "auth_header"
+        )):
+            raise ConfigurationError("--key-only cannot change provider or model settings")
+        validate_provider_config(existing_config)
+        provider = existing_config.get("provider", {}).get(existing_provider_id, {})
+        mode, header = provider_auth_settings(current)
+        expected = ("Bearer " if mode == "bearer" else "") + "{env:AWOKI_EMBEDDING_API_KEY}"
+        headers = {name.lower(): value for name, value in provider.get("options", {}).get("headers", {}).items()}
+        if not provider or headers.get(header.lower()) != expected:
+            raise ConfigurationError("configure a managed shared-key provider with make ai-configure first")
+        if current.get("AWOKI_RERANK_API_KEY") or current.get("AWOKI_RERANK_API_KEY_ENV", "AWOKI_EMBEDDING_API_KEY") != "AWOKI_EMBEDDING_API_KEY":
+            raise ConfigurationError("reranker uses a separate credential; configure shared-key mode first")
+        raw_key = sys.stdin.readline() if args.api_key_stdin else getpass.getpass("New shared API key (hidden): ")
+        key, _ = _normalise_key(raw_key)
+        updated = _update_env_text(env_text, {"AWOKI_EMBEDDING_API_KEY": key})
+        print("AWOKI_EMBEDDING_API_KEY: [redacted] -> [redacted]")
+        if not args.dry_run:
+            _apply_configuration([(env_path, updated)], root=root, reload=args.reload)
+        return 0
+    reranker_enabled = args.reranker if args.reranker is not None else (
+        current.get("AWOKI_RERANK_ENABLED", "1").lower() in {"1", "true", "yes", "on"}
+    )
+    old_base = current.get("AWOKI_EMBEDDING_BASE_URL", "")
+    old_rerank = current.get("AWOKI_RERANK_URL", "")
+    rerank_provider = args.rerank_provider or (current.get("AWOKI_RERANK_PROVIDER") if old_rerank else "") or "http"
+    rerank_derived = not old_rerank or (
+        current.get("AWOKI_AI_RERANK_URL_MODE") != "explicit"
+        and old_base and old_rerank == _default_rerank_url(old_base)
+    )
+    explicit_rerank = args.rerank_url is not None or bool(os.environ.get("AWOKI_AI_RERANK_URL"))
+    explicit_deployment = args.embedding_deployment is not None or bool(os.environ.get("AWOKI_AI_EMBEDDING_DEPLOYMENT"))
 
     base_url = _choose(
         args.base_url,
@@ -301,7 +421,7 @@ def main() -> int:
     embedding_deployment = _choose(
         args.embedding_deployment,
         "AWOKI_AI_EMBEDDING_DEPLOYMENT",
-        current.get("AWOKI_EMBEDDING_DEPLOYMENT_ID", ""),
+        current.get("AWOKI_EMBEDDING_DEPLOYMENT_ID", "") if embedding_model == current.get("AWOKI_EMBEDDING_MODEL") else "",
         embedding_model,
     )
     vector_size = _choose(
@@ -313,7 +433,7 @@ def main() -> int:
     rerank_url = _choose(
         args.rerank_url,
         "AWOKI_AI_RERANK_URL",
-        current.get("AWOKI_RERANK_URL", ""),
+        "" if rerank_derived else old_rerank,
         "",
     )
     rerank_model = _choose(
@@ -371,9 +491,7 @@ def main() -> int:
         "Authorization" if auth_mode == "bearer" else "X-API-Key",
     ).strip()
 
-    if args.add_chat_model:
-        key_input = current.get("AWOKI_EMBEDDING_API_KEY", "")
-    elif args.api_key_stdin:
+    if args.api_key_stdin:
         key_input = sys.stdin.readline().rstrip("\r\n")
     else:
         key_input = os.environ.get("AWOKI_AI_API_KEY") or current.get(
@@ -382,51 +500,47 @@ def main() -> int:
 
     interactive = not args.non_interactive and sys.stdin.isatty() and sys.stdout.isatty()
     if interactive:
-        if args.add_chat_model:
-            chat_model = _prompt("Additional chat model ID", "")
-            model_name = _prompt("Model display name", chat_model)
-            context = _prompt("Context limit in tokens (positive integer)", context)
-            output = _prompt("Output limit in tokens (positive integer)", output)
-        else:
-            print("Configure a custom OpenAI-compatible provider for chat, embeddings, and reranking.")
-            base_url = _prompt("Custom provider base URL (http(s), usually ending in /v1)", base_url)
-            auth_mode = _prompt(
-                "Authentication mode (bearer = Authorization: Bearer <key>; header = custom header: <key>)",
-                auth_mode,
-            ).lower()
-            if auth_mode == "bearer":
-                auth_header = "Authorization"
-            elif auth_mode == "header":
-                suggested_header = (
-                    auth_header
-                    if auth_header and auth_header.lower() != "authorization"
-                    else "X-API-Key"
-                )
-                auth_header = _prompt("Custom API-key header name (raw key value)", suggested_header)
-            embedding_model = _prompt("Embedding model ID", embedding_model)
-            embedding_deployment = _prompt("Embedding deployment ID", embedding_deployment)
-            vector_size = _prompt("Embedding vector size (positive integer)", vector_size)
-            rerank_model = "" if args.no_reranker else _prompt("Reranker model ID", rerank_model)
-            proposed_rerank = rerank_url or (_default_rerank_url(base_url) if base_url else "")
-            rerank_url = "" if args.no_reranker else _prompt("Reranker URL (http(s))", proposed_rerank)
-            chat_model = _prompt("OpenCode chat model ID", chat_model)
-            provider_id = _prompt("OpenCode provider ID (letters, digits, dot, _ or -)", provider_id)
-            provider_name = _prompt("OpenCode provider display name", provider_name)
-            model_name = _prompt("OpenCode model display name", model_name or chat_model)
-            context = _prompt("Chat context limit in tokens (positive integer)", context)
-            output = _prompt("Chat output limit in tokens (positive integer)", output)
-            entered_key = getpass.getpass(
-                "Shared API key [Enter keeps existing; optional 'Bearer ' is removed]: "
+        print("Configure a custom OpenAI-compatible provider for chat, embeddings, and reranking.")
+        base_url = _prompt("Custom provider base URL (http(s), usually ending in /v1)", base_url)
+        auth_mode = _prompt(
+            "Authentication mode (bearer = Authorization: Bearer <key>; header = custom header: <key>)",
+            auth_mode,
+        ).lower()
+        if auth_mode == "bearer":
+            auth_header = "Authorization"
+        elif auth_mode == "header":
+            suggested_header = (
+                auth_header
+                if auth_header and auth_header.lower() != "authorization"
+                else "X-API-Key"
             )
-            if entered_key:
-                key_input = entered_key
-
-    if args.add_chat_model and args.non_interactive and not (
-        args.chat_model or os.environ.get("AWOKI_AI_CHAT_MODEL")
-    ):
-        raise ConfigurationError(
-            "non-interactive --add-chat-model requires --chat-model or AWOKI_AI_CHAT_MODEL"
+            auth_header = _prompt("Custom API-key header name (raw key value)", suggested_header)
+        previous_model = embedding_model
+        embedding_model = _prompt("Embedding model ID", embedding_model)
+        if embedding_model != previous_model and not explicit_deployment:
+            embedding_deployment = embedding_model
+        embedding_deployment = _prompt("Embedding deployment ID", embedding_deployment)
+        vector_size = _prompt("Embedding vector size (positive integer)", vector_size)
+        if args.reranker is None:
+            reranker_enabled = _prompt("Enable reranker? (yes/no)", "yes" if reranker_enabled else "no").lower() in {"yes", "y"}
+        rerank_model = _prompt("Reranker model ID", rerank_model) if reranker_enabled else rerank_model
+        proposed_rerank = rerank_url or (_default_rerank_url(base_url) if base_url else "")
+        if reranker_enabled:
+            rerank_provider = _prompt("Reranker API format (http = model/documents; tei = native texts API)", rerank_provider).lower()
+            rerank_url = _prompt("Reranker URL (http(s))", proposed_rerank)
+            explicit_rerank = rerank_url != _default_rerank_url(base_url)
+        chat_model = _prompt("OpenCode chat model ID", chat_model)
+        provider_id = _prompt("OpenCode provider ID (letters, digits, dot, _ or -)", provider_id)
+        provider_name = _prompt("OpenCode provider display name", provider_name)
+        model_name = _prompt("OpenCode model display name", model_name or chat_model)
+        context = _prompt("Chat context limit in tokens (positive integer)", context)
+        output = _prompt("Chat output limit in tokens (positive integer)", output)
+        entered_key = getpass.getpass(
+            "Shared API key [Enter keeps existing; optional 'Bearer ' is removed]: "
         )
+        if entered_key:
+            key_input = entered_key
+
 
     base_url = _validated_url(base_url, "base URL")
     if auth_mode not in {"bearer", "header"}:
@@ -437,14 +551,21 @@ def main() -> int:
         raise ConfigurationError("authentication header must be a valid HTTP header name")
     if auth_header.lower() in {"content-type", "user-agent"}:
         raise ConfigurationError("authentication header cannot be Content-Type or User-Agent")
-    if not rerank_url and not args.no_reranker:
+    if not rerank_url:
         rerank_url = _default_rerank_url(base_url)
     if rerank_url:
         rerank_url = _validated_url(rerank_url, "reranker URL")
+    if rerank_provider not in {"http", "tei"}:
+        raise ConfigurationError("reranker API format must be http or tei")
+    auth_mode, auth_header = provider_auth_settings({
+        "AWOKI_AI_AUTH_MODE": auth_mode, "AWOKI_AI_AUTH_HEADER": auth_header,
+    })
     key, removed_prefix = _normalise_key(key_input)
     vector_size_int = _positive_int(vector_size, "vector size")
     context_int = _positive_int(context, "context limit")
     output_int = _positive_int(output, "output limit")
+    if output_int > context_int:
+        raise ConfigurationError("output limit must not exceed context limit")
 
     for label, value in (
         ("embedding model", embedding_model),
@@ -453,7 +574,7 @@ def main() -> int:
     ):
         if not value.strip():
             raise ConfigurationError(f"{label} is required")
-    if not args.no_reranker and not rerank_model.strip():
+    if reranker_enabled and not rerank_model.strip():
         raise ConfigurationError("reranker model is required unless --no-reranker is used")
     if not IDENTIFIER_RE.fullmatch(provider_id):
         raise ConfigurationError(
@@ -469,10 +590,11 @@ def main() -> int:
         "AWOKI_AI_AUTH_MODE": auth_mode,
         "AWOKI_AI_AUTH_HEADER": auth_header,
         "AWOKI_VECTOR_SIZE": str(vector_size_int),
-        "AWOKI_RERANK_ENABLED": "0" if args.no_reranker else "1",
-        "AWOKI_RERANK_PROVIDER": "http",
-        "AWOKI_RERANK_URL": "" if args.no_reranker else rerank_url,
-        "AWOKI_RERANK_MODEL": "" if args.no_reranker else rerank_model.strip(),
+        "AWOKI_RERANK_ENABLED": "1" if reranker_enabled else "0",
+        "AWOKI_RERANK_PROVIDER": rerank_provider,
+        "AWOKI_RERANK_URL": rerank_url,
+        "AWOKI_AI_RERANK_URL_MODE": "derived" if rerank_derived and not explicit_rerank else "explicit",
+        "AWOKI_RERANK_MODEL": rerank_model.strip(),
         # Keep one copy of the shared secret. Runtime snapshotting resolves this
         # indirection before invoking the reranker.
         "AWOKI_RERANK_API_KEY": "",
@@ -489,7 +611,18 @@ def main() -> int:
     if not isinstance(providers, dict):
         raise ConfigurationError("OpenCode provider configuration must be an object")
     if existing_provider_id and existing_provider_id != provider_id:
-        providers.pop(existing_provider_id, None)
+        if provider_id in providers:
+            raise ConfigurationError("provider ID already exists; refusing to overwrite it")
+        providers[provider_id] = providers.pop(existing_provider_id, {})
+        agents = existing_config.get("agent", {})
+        if not isinstance(agents, dict):
+            raise ConfigurationError("OpenCode agent configuration must be an object")
+        for owner in [existing_config, *agents.values()]:
+            if isinstance(owner, dict):
+                for field in ("model", "small_model"):
+                    value = owner.get(field)
+                    if isinstance(value, str) and value.startswith(existing_provider_id + "/"):
+                        owner[field] = provider_id + value[len(existing_provider_id):]
     existing_provider = providers.get(provider_id, {})
     if not isinstance(existing_provider, dict):
         raise ConfigurationError(f"OpenCode provider {provider_id!r} must be an object")
@@ -503,9 +636,8 @@ def main() -> int:
         raise ConfigurationError(f"OpenCode provider {provider_id!r} headers must be an object")
     headers = dict(headers)
     previous_auth_header = current.get("AWOKI_AI_AUTH_HEADER", "Authorization").strip()
-    if previous_auth_header:
-        headers.pop(previous_auth_header, None)
-    headers.pop("Authorization", None)
+    replaced_headers = {previous_auth_header.lower(), auth_header.lower(), "authorization", "user-agent"}
+    headers = {name: value for name, value in headers.items() if name.lower() not in replaced_headers}
     if auth_mode == "bearer":
         headers["Authorization"] = "Bearer {env:AWOKI_EMBEDDING_API_KEY}"
     else:
@@ -546,18 +678,26 @@ def main() -> int:
     providers[provider_id] = provider_config
     config_text = json.dumps(existing_config, indent=2, ensure_ascii=False) + "\n"
     # Validate both generated documents before either replaces user state.
-    json.loads(config_text)
+    validate_provider_config(json.loads(config_text))
     env_output = _update_env_text(env_text, updates)
 
-    env_mode = stat.S_IMODE(env_path.stat().st_mode) if env_path.exists() else 0o600
-    config_mode = stat.S_IMODE(config_path.stat().st_mode) if config_path.exists() else 0o600
-    _atomic_write(env_path, env_output, min(env_mode, 0o600))
-    _atomic_write(config_path, config_text, min(config_mode, 0o600))
+    _preview(current, updates)
+    if old_base and old_base != base_url:
+        print("Endpoint changed: verify deployment identity/dimensions; existing vectors are not migrated.")
+    if reranker_enabled and urlsplit(rerank_url).netloc != urlsplit(base_url).netloc:
+        print("WARNING: reranking uses a separate server; the shared key and eligible documents will be sent there.")
+    if args.dry_run:
+        print("awoki_ai_config=dry_run (no files written or services restarted)")
+        return 0
+    if interactive and _prompt("Apply configuration? (yes/no)", "yes").lower() not in {"yes", "y"}:
+        print("Configuration unchanged.")
+        return 0
+    _apply_configuration([(env_path, env_output), (config_path, config_text)], root=root, reload=args.reload)
 
     print(f"awoki_ai_config=ok env={env_path} opencode={config_path}")
     print(f"base_url={base_url}")
     print(f"embedding_model={embedding_model.strip()} vector_size={vector_size_int}")
-    if args.no_reranker:
+    if not reranker_enabled:
         print("reranker=disabled")
     else:
         print(f"reranker_model={rerank_model.strip()} url={rerank_url}")
@@ -574,6 +714,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except ConfigurationError as exc:
+    except (ValueError, OSError) as exc:
         print(f"[awoki] AI configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2)
