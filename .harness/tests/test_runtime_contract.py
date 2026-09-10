@@ -445,6 +445,32 @@ class RuntimeContractTests(unittest.TestCase):
             self.assertNotIn("PATH=/usr/local/go/bin:${PATH}", text)
             self.assertNotIn("golang-go", text)
 
+    def test_ci_prebuilds_the_runtime_pinned_go_helper_before_parallel_tests(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
+        lock = json.loads((ROOT / ".harness" / "runtime-dependencies.lock.json").read_text(encoding="utf-8"))
+        image = lock["critical_runtime"]["go_semantics_builder"]["image"]
+        match = re.fullmatch(r"golang:(\d+\.\d+\.\d+)-bookworm", image)
+        self.assertIsNotNone(match)
+        version = match.group(1)
+        setup = workflow.index("uses: actions/setup-go@")
+        build = workflow.index("- name: Build pinned Go semantics helper before parallel tests")
+        validate = workflow.index("- name: Validate source and run regression suite")
+        self.assertLess(setup, build)
+        self.assertLess(build, validate)
+        self.assertIn(f"go-version: '{version}'", workflow[setup:build])
+        self.assertIn("cache: false", workflow[setup:build])
+        helper_setup = workflow[build:workflow.index("      - name:", build + 1)]
+        for required in (
+            "set -euo pipefail", "CGO_ENABLED=0 GO111MODULE=off GOTOOLCHAIN=local",
+            'go build -trimpath -ldflags="-s -w"', ".harness/code_search/go_semantics_probe.go",
+            'sudo install -m 755 "$RUNNER_TEMP/awoki-go-semantics" /usr/local/bin/awoki-go-semantics',
+            f'test "$(/usr/local/bin/awoki-go-semantics --version)" = \'awoki-go-semantics go{version}\'',
+            'assert result["status"] == "ok", result',
+            'assert result["execution_backend"] == "prebuilt_pinned_helper", result',
+        ):
+            self.assertIn(required, helper_setup)
+        self.assertIn("run: make validate PYTHON=python", workflow[validate:])
+
     def test_both_images_fail_build_on_incompatible_mcp_runtime(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         opencode = (ROOT / "Dockerfile.opencode").read_text(encoding="utf-8")
