@@ -173,7 +173,7 @@ def parser_runtime_profile() -> dict[str, Any]:
         "dependency_versions": dependency_versions,
         "language_abi": language_abi,
         "grammar_profile": "awoki-curated-v1",
-        "extraction_profile": "awoki-symbol-extraction-v4",
+        "extraction_profile": "awoki-symbol-extraction-v5",
         "languages": sorted(BY_NAME),
         "deterministic_builtin_parsers": ["smali"],
         "runtime_downloads": False,

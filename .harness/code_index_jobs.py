@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any, Iterator
 
 import project_workspace
 import runtime_safety
+import safety
 from code_search import engine as code_search
 
 STATE_VERSION = 1
@@ -190,6 +192,7 @@ def _job_progress_summary(state: dict[str, Any]) -> dict[str, Any]:
         'current_repository': current_id if scope_type == 'repository' else '',
         'current_source': current_id if scope_type == 'source' else '',
         'current_path': str(current.get('current_path') or ''),
+        'failure': state.get('failure') or current.get('failure') or {},
         'files_total': files_total,
         'files_processed': files_processed,
         'files_parsed': total('files_parsed'),
@@ -489,6 +492,9 @@ def _worker(root: Path, project_id: str, job_id: str) -> int:
             }
             if not ok:
                 terminal_progress['reason'] = str(result.get('reason') or freshness.get('reason') or 'local code-index refresh failed')
+                # A rejected result may identify a file that never emitted a
+                # successful progress event. Never substitute the previous file.
+                terminal_progress['current_path'] = str(result.get('path') or '')
             _update_progress(state_path, scope_id, terminal_progress)
             print(f"[code-index-refresh] project={project_id} {scope_type}={scope_id} status={result.get('status')} lexical_current={bool((freshness.get('freshness') or {}).get('lexical_current'))}", flush=True)
 
@@ -514,22 +520,42 @@ def _worker(root: Path, project_id: str, job_id: str) -> int:
         return 1 if failures else 0
     except BaseException as exc:
         state = _read_json(state_path) or state
+        current = state.get('progress') if isinstance(state.get('progress'), dict) else {}
+        failure = {
+            'project_id': project_id,
+            'repo_id': state.get('current_repository') or '',
+            'source_id': state.get('current_source') or '',
+            'phase': current.get('phase') or 'unknown',
+            'path': '',  # A last-success path is not evidence of the failing file.
+            **getattr(exc, 'index_failure', {}),
+            'exception_type': type(exc).__name__,
+            'stack': [
+                {'file': frame.f_code.co_filename, 'line': line, 'function': frame.f_code.co_name}
+                for frame, line in traceback.walk_tb(exc.__traceback__)
+            ][-12:],
+        }
+        failure = safety.redact_source_nested(failure)[0]
+        reason = safety.redact_source_text(f'{type(exc).__name__}: {exc}')[0][:1000]
         if str(state.get('status') or '') != 'cancelled':
             state['status'] = 'failed'
-            state['reason'] = f'{type(exc).__name__}: {exc}'[:1000]
+            state['reason'] = reason
+            state['failure'] = failure
             state['results'] = results
             state['current_repository'] = ''
             state['current_source'] = ''
             state['finished_at'] = _now()
             state['updated_at'] = state['finished_at']
             state['progress'] = {
-                **(state.get('progress') if isinstance(state.get('progress'), dict) else {}),
+                **current,
                 'phase': 'failed',
+                'current_path': failure.get('path') or '',
+                'failure': failure,
                 'reason': state['reason'],
                 'updated_at': state['finished_at'],
             }
             _write_json(state_path, state)
-        print(f'[code-index-refresh] failed: {type(exc).__name__}: {exc}', flush=True)
+        print(f'[code-index-refresh] failed: {reason}', flush=True)
+        print('[code-index-refresh] failure_context=' + json.dumps(failure, ensure_ascii=True), flush=True)
         return 1
 
 

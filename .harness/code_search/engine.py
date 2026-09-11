@@ -711,9 +711,11 @@ def index_project_code(
                         "expected_sha256": entry.get("content_hash"),
                         "observed_sha256": observed_hash,
                     }
-                parsed = _sanitize_parsed_source(parse_source(rel_path, data, embedding_profile_hash))
                 file_id = _sha(f"{project_id}|{branch.source_id}|{branch.revision_key}|{rel_path}|{entry['content_hash']}")
+                file_phase = "parse_source"
                 try:
+                    parsed = _sanitize_parsed_source(parse_source(rel_path, data, embedding_profile_hash))
+                    file_phase = "replace_file"
                     replace_stats = store.replace_file(
                         db,
                         file_id=file_id,
@@ -735,6 +737,24 @@ def index_project_code(
                         "error": str(exc),
                         "reference_integrity": reference_integrity,
                     }
+                except Exception as exc:
+                    failure = {
+                        "project_id": project_id, "repo_id": branch.repo_id,
+                        "source_id": branch.source_id, "revision_key": branch.revision_key,
+                        "path": rel_path, "file_id": file_id, "phase": file_phase,
+                        **getattr(exc, "index_failure", {}),
+                    }
+                    exc.index_failure = failure
+                    if progress_callback is not None:
+                        progress_callback({
+                            "phase": "failed", "failure": failure,
+                            "current_path": rel_path, "files_total": len(included),
+                            "files_processed": entry_index - 1,
+                            "files_parsed": len(changed_files), "files_reused": len(reused_files),
+                            "files_removed": 0, "parse_modes": dict(parse_modes),
+                            "progress_percent": round(((entry_index - 1) / max(1, len(included))) * 90.0, 1),
+                        })
+                    raise
                 for key in (
                     "references_input",
                     "references_stored",

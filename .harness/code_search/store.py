@@ -17,6 +17,47 @@ class ReferenceIdentityConflict(ValueError):
     """Raised when one parser reference id describes conflicting occurrences."""
 
 
+class IndexWriteError(sqlite3.IntegrityError):
+    """A failed insert with metadata-only context; the transaction still rolls back."""
+
+    def __init__(self, diagnostic: dict[str, Any]):
+        self.index_failure = diagnostic
+        super().__init__("code-index constraint failure: " + json.dumps(diagnostic, ensure_ascii=True))
+
+
+def _insert_occurrence(
+    conn: sqlite3.Connection, sql: str, values: tuple[Any, ...], *,
+    table: str, identity_column: str, context: dict[str, Any],
+) -> None:
+    # Table/column names are fixed by the callers below, never repository input.
+    try:
+        conn.execute(sql, values)
+    except sqlite3.IntegrityError as exc:
+        diagnostic = {
+            **context, "phase": "replace_file", "table": table,
+            "identity_column": identity_column, "attempted_id": values[0],
+            "sqlite_errorname": getattr(exc, "sqlite_errorname", "SQLITE_CONSTRAINT"),
+        }
+        # Inspect before rollback, without selecting source text or signatures.
+        # This is an observation within the failed transaction, not a diagnosis
+        # of whether the row predated this indexing attempt.
+        try:
+            row = conn.execute(
+                f"SELECT file_id FROM {table} WHERE {identity_column}=?", (values[0],),
+            ).fetchone()
+            if row is not None:
+                diagnostic["conflicting_id"] = values[0]
+                diagnostic["existing_file_id"] = row["file_id"]
+                owner = conn.execute(
+                    "SELECT project_id, repo_id, source_id, revision_key, path "
+                    "FROM code_files WHERE file_id=?", (row["file_id"],),
+                ).fetchone()
+                diagnostic["existing_file_in_transaction"] = dict(owner) if owner else None
+        except sqlite3.Error:
+            diagnostic["conflict_lookup"] = "unavailable"
+        raise IndexWriteError(diagnostic) from exc
+
+
 def _reference_payload(reference: CodeReference) -> tuple[Any, ...]:
     """Return every persisted field that a parser reference id is expected to identify.
 
@@ -69,10 +110,16 @@ def manifest_path(project_dir: Path) -> Path:
 def _connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+            raise sqlite3.DatabaseError("code-index foreign-key enforcement is unavailable; refusing to write")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -338,9 +385,18 @@ def replace_file(
         )
 
     rev = _revision_fields(branch)
+    failure_context = {
+        "project_id": project_id, "repo_id": rev["repo_id"],
+        "source_id": rev["source_id"], "revision_key": rev["revision_key"],
+        "path": rel_path, "file_id": file_id,
+    }
     init_db(path)
     with closing(_connect(path)) as conn:
         with conn:
+            # A connection context manager alone does not start a transaction
+            # for SELECT. Reserve the writer before checking the old occurrence,
+            # so concurrent replacements cannot both act on an absent/stale row.
+            conn.execute("BEGIN IMMEDIATE")
             old = conn.execute(
                 "SELECT file_id FROM code_files WHERE project_id=? AND source_id=? AND revision_key=? AND path=?",
                 (project_id, rev["source_id"], rev["revision_key"], rel_path),
@@ -349,7 +405,7 @@ def replace_file(
                 old_id = str(old["file_id"])
                 conn.execute("DELETE FROM code_chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM code_chunks WHERE file_id=?)", (old_id,))
                 conn.execute("DELETE FROM code_files WHERE file_id=?", (old_id,))
-            conn.execute(
+            _insert_occurrence(conn,
                 """
                 INSERT INTO code_files(
                     file_id, project_id, repo_id, source_id, source_type, revision_key,
@@ -365,10 +421,11 @@ def replace_file(
                     rel_path, parsed.language, content_hash, size_bytes, parsed.parser_id,
                     parsed.parse_mode, parsed.parse_status, json.dumps(diagnostics, ensure_ascii=False), indexed_at,
                 ),
+                table="code_files", identity_column="file_id", context=failure_context,
             )
             for symbol in parsed.symbols:
                 occurrence_symbol_id = symbol_ids[symbol.symbol_id]
-                conn.execute(
+                _insert_occurrence(conn,
                     """
                     INSERT INTO code_symbols(
                         symbol_id, file_id, name, qualified_name, kind, parent_symbol_id,
@@ -380,6 +437,7 @@ def replace_file(
                         symbol_ids.get(symbol.parent_symbol_id or ""), symbol.start_byte, symbol.end_byte,
                         symbol.start_line, symbol.end_line, symbol.signature, symbol.content_hash,
                     ),
+                    table="code_symbols", identity_column="symbol_id", context=failure_context,
                 )
             signatures = {symbol_ids[symbol.symbol_id]: symbol.signature for symbol in parsed.symbols}
             for chunk in parsed.chunks:
@@ -387,7 +445,7 @@ def replace_file(
                 occurrence_chunk_id = hashlib.sha256(
                     f"{file_id}|chunk|{chunk.chunk_id}".encode("utf-8")
                 ).hexdigest()
-                conn.execute(
+                _insert_occurrence(conn,
                     """
                     INSERT INTO code_chunks(
                         chunk_id, file_id, symbol_id, symbol_name, qualified_name, symbol_kind,
@@ -401,6 +459,7 @@ def replace_file(
                         chunk.chunk_total, chunk.start_line, chunk.end_line, chunk.title,
                         chunk.text, chunk.content_hash, chunk.embedding_key,
                     ),
+                    table="code_chunks", identity_column="chunk_id", context=failure_context,
                 )
                 conn.execute(
                     """
@@ -419,7 +478,7 @@ def replace_file(
                 occurrence_reference_id = hashlib.sha256(
                     f"{file_id}|reference|{reference.reference_id}".encode("utf-8")
                 ).hexdigest()
-                conn.execute(
+                _insert_occurrence(conn,
                     """
                     INSERT INTO code_references(
                         reference_id, file_id, source_symbol_id, reference_kind, target_name,
@@ -434,6 +493,7 @@ def replace_file(
                         reference.source_text,
                         json.dumps(list(reference.control_context), ensure_ascii=False),
                     ),
+                    table="code_references", identity_column="reference_id", context=failure_context,
                 )
     return {
         "references_input": len(parsed.references),
@@ -473,11 +533,12 @@ def delete_stale_files(path: Path, project_id: str, branch_key: str, current_pat
     init_db(path)
     removed: list[str] = []
     with closing(_connect(path)) as conn:
-        rows = conn.execute(
-            "SELECT file_id, path FROM code_files WHERE project_id=? AND branch_key=?",
-            (project_id, branch_key),
-        ).fetchall()
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT file_id, path FROM code_files WHERE project_id=? AND branch_key=?",
+                (project_id, branch_key),
+            ).fetchall()
             for row in rows:
                 rel = str(row["path"])
                 if rel in current_paths:

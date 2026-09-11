@@ -40,6 +40,83 @@ enabled registered repositories. Exact definition/source/graph/evidence/semantic
 and exhaustive operations accept `repo=` and reject ambiguous multi-repo requests
 instead of selecting a checkout arbitrarily.
 
+### Investigating indexing constraint failures
+
+The current extraction profile (`awoki-symbol-extraction-v5`) identifies
+Tree-sitter declarations by exact byte span and node type as well as name/content.
+Distinct declarations on the same line therefore no longer share symbol/chunk
+IDs just because their names and bodies match. Storage reserves a write
+transaction before looking up a file to replace/delete and verifies that
+foreign-key enforcement is enabled on each connection.
+
+After deploying this change, explicitly refresh the structural index: prior
+parser-profile snapshots are stale and their files will be reparsed. The schema
+version remains unchanged; no whole-database reset is needed for the upgrade.
+Unchanged chunk contents retain their embedding keys. Published vector membership
+history is retained, but changed occurrence IDs require an explicit vector
+refresh before semantic readiness can be claimed. This fix does not silently
+remove orphaned rows created earlier by external/manual database edits, nor prove
+that this parser bug caused any particular historical failure.
+
+Identical files across registered repositories are supported: persisted symbol,
+chunk, and reference IDs include the source/revision-specific file identity.
+Do **not** modify source files, configuration, or binary fonts merely to make
+their contents unique. Do not manually delete index rows or the database while
+investigating; preserve the failed job JSON/log and the source diffs first.
+An empty `code-index.lock` is normal for an advisory lock, not proof it is stale.
+Deleting a lock file while a worker holds it can defeat mutual exclusion.
+
+New parser/storage exceptions report the exact failing `path` in job progress,
+not the previous successful file. SQLite insert failures also record the table,
+attempted ID, source/revision, and conflicting ID/owner when observable, in
+`failure` and the log's `failure_context` JSON. Stack entries contain only code
+locations, not source snippets or local variables. The existing row is observed
+inside the failing transaction; its presence alone does not prove whether it
+predated this attempt. Constraints and per-file rollback remain unchanged.
+For failures outside the instrumented parse/store step, the path is left unknown
+rather than blaming the last reported file. Older job logs cannot retroactively
+identify a failing file from their last progress entry.
+
+Use the standalone read-only checker **on the installation that failed**:
+
+```bash
+python3 -B .harness/check_code_index.py --root /awoki --project poly-zero
+```
+
+Replace `/awoki` with that installation's root if running on its host instead of
+inside its container, and `poly-zero` with the exact workspace directory ID.
+The checker requires only Python's standard library and can inspect an older
+deployment without importing its harness or triggering schema initialization.
+From a host checkout containing the new checker, inspect its existing OpenCode
+container without rebuilding/restarting it:
+
+```bash
+docker compose -f docker-compose.opencode.yml exec -T --user op awoki-opencode-ssh \
+  python3 -B - --root /awoki --project poly-zero < .harness/check_code_index.py
+```
+
+Run that command in the **other PC's correct Compose checkout**, not a different
+installation on your current computer. It streams the checker over stdin; it
+does not install or patch the runtime. If your launcher uses a custom Compose
+project name, select that same project with Compose's `-p` option.
+
+Output includes deployed source SHA-256 hashes, the database schema, a bounded
+SQLite consistency check, missing cascade constraints, orphan counts, and FTS
+membership checks. No source snippets, provider configuration, remote embeddings,
+or Qdrant calls are collected. Queries share one read snapshot and default to a
+15-second budget (`--timeout 60` allows more time, maximum 120). The database is
+opened with `mode=ro` and `query_only`; missing/old schemas are reported, never
+created, reset, or repaired. Normal SQLite WAL shared-memory bookkeeping may
+still occur; this is not a byte-frozen forensic capture. For frozen evidence use
+a proper backup, not a copy of a live `.sqlite` file without its WAL.
+
+Exit status: `0` means these database checks passed and code hashes were read;
+`1` means database issues, missing/unsupported schema, or an incomplete check;
+`2` means invalid arguments or unavailable deployed code files with an otherwise
+passing database check. `ok` does not prove parser correctness, index freshness,
+the worker's per-connection foreign-key setting, or semantic retrieval readiness.
+Hashes describe files on disk, not code already loaded by a running worker.
+
 Repository evidence is layered rather than reduced to one “Git truth” bit:
 
 ```text

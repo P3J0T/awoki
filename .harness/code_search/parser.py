@@ -583,7 +583,12 @@ def _tree_sitter_parse(path: str, data: bytes, spec: LanguageSpec, embedding_pro
             declaration_end = int(node.end_byte)
             body_text = _slice_text(data, declaration_start, declaration_end)
             content_hash = _sha256(body_text)
-            symbol_id = _sha256(f"{path}|{qualified}|{_point_line(node)}|{content_hash}")
+            # Line numbers are not occurrence identities: distinct declarations
+            # in minified code can share a name, body, and source line. Include
+            # the exact declaration span before chunk/reference IDs are derived.
+            symbol_id = _sha256(
+                f"{path}|{qualified}|{node_type}|{declaration_start}|{declaration_end}|{content_hash}"
+            )
             symbol_kind = _symbol_kind(node_type, spec)
             # Python Tree-sitter represents class methods with the generic
             # `function_definition` node type. Preserve lexical ownership:

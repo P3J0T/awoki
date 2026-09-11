@@ -2,6 +2,15 @@
 
 ## Unreleased — OpenCode Web shared-backend runtime
 
+### Code-index identity and transaction safety
+
+- Fixes Tree-sitter symbol/chunk ID collisions for distinct declarations with the same name and body on one line, including minified JavaScript and TypeScript. Symbol identity now includes the exact declaration byte span and grammar node type.
+- Advances the extraction profile to `awoki-symbol-extraction-v5`, so explicit structural refresh reparses previous-profile files without resetting the SQLite schema or discarding published vector membership history.
+- Starts file replacement and stale-file deletion transactions before reading existing rows, closing a storage-level concurrent check-then-write race, and verifies foreign-key enforcement on every storage connection.
+- Adds precise failing-file/constraint diagnostics and a standalone read-only consistency checker. Existing externally orphaned rows are reported, not silently deleted; this is not an automatic repair of previously damaged databases.
+
+### OpenCode Web and installation
+
 - Enables authenticated OpenCode Web by default on host loopback (`127.0.0.1:4096`) while retaining an explicit `AWOKI_OPENCODE_WEB_ENABLED=0` standalone SSH mode.
 - Secures the host `.opencode-state/` and Web auth directories to `0700` and generates a persistent random Web password in ignored `.opencode-state/web-auth/password` as a single-link `0600` file instead of shipping a fixed default; explicit operator overrides remain supported.
 - Mounts the auth directory read-only, copies the secret into container `/run` tmpfs as `op:op 0600`, and keeps it out of Compose service environment, runtime snapshots, diagnostics, and command-line arguments.
