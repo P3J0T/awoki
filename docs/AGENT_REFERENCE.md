@@ -5,7 +5,7 @@ sections relevant to the task, not this entire reference at startup. The compact
 `AGENTS.md` and `.harness/AGENT_CORE.md` are the current entry points; if wording
 differs, their normal-work routing takes precedence. Paths below are root-relative.
 
-Maintainer/context orientation: read `docs/AWOKI_IDENTITY.md` before proposing architectural expansion. v0.1.7 is in stabilization/usefulness-evaluation mode: prefer realistic-work evidence, simplification, merging, and deletion over adding another persistent mechanism. Do not inject the dense identity file wholesale into every normal task.
+Maintainer/context orientation: read `docs/AWOKI_IDENTITY.md` before proposing architectural expansion. Awoki remains in stabilization/usefulness-evaluation mode: prefer realistic-work evidence, simplification, merging, and deletion over adding another persistent mechanism. Do not inject the dense identity file wholesale into every normal task.
 
 You are operating inside **Awoki**, a continuity-first project/global memory, retrieval, evidence, and workflow harness for OpenCode.
 

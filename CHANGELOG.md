@@ -1,6 +1,30 @@
 # Changelog
 
-## Unreleased — OpenCode Web shared-backend runtime
+## v0.2.0 — qualified memory, findings review and shared runtime (2026-09-13)
+
+### Retrieval and investigation continuity
+
+- Keeps normal retrieval responses and always-loaded instructions compact while retaining detailed diagnostics and on-demand procedures.
+- Adds bounded reranker input budgets and observable rate-limit cooldown/fallback behavior without changing original evidence.
+- Binds saved source references to exact project/repository/revision/range and supports reopening them without reconstructing paths.
+- Adds batch notes, exact paginated recall, qualified `based_on` follow-ups, and lightweight investigation checkpoints that preserve uncertainty and lead status.
+- Keeps compaction summaries separate from current-user-turn completion and carries the shared execution/reliability policy through compaction.
+- Requires explicit named scopes and client approval for cross-project search; multi-repository search within one project remains available normally.
+
+### Focused findings review
+
+- Extends `/verify` and the existing reliability records with a read-only, paginated review view; no additional memory database or slash command.
+- Separates exact machine-checked/refuted propositions from evidence-attached interpretations, unknowns, stale claims and contradictions.
+- Retains exact checked propositions or normalized semantics inputs, source/toolchain context and certainty boundaries in new verifier receipts.
+- Preserves qualified report references in ordinary memory without certifying later paraphrases. Legacy receipts lacking exact scopes require re-verification for the new checked labels.
+
+### Validation and limitations
+
+- The implementation passed 724-test suites on Linux (1 skip) and macOS (13 environment-dependent skips), plus real verifier-adapter and OpenCode SDK/session-hook checks.
+- Live Qwen testing completed real compaction and fresh-session recovery, but the full semantic/workflow acceptance did not pass: the model confused an index miss with file absence and did not consistently reopen reports/source or preserve report qualifications. This release remains a supervised investigation tool, not an autonomous-truthfulness guarantee. See `docs/EVALUATION_2026-09-13.md`.
+- Public package version is `0.2.0`; internal harness version is `10.22`. The release marker does not change SQLite schema 4 or the current `awoki-symbol-extraction-v5` profile.
+
+The following runtime, configuration and indexing changes are also included since v0.1.7.
 
 ### Code-index identity and transaction safety
 
