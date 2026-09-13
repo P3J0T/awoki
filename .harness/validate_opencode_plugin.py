@@ -93,6 +93,11 @@ declare const Bun: any
         if node:
             script = f'''
 const plugin = await import({json.dumps(compiled.as_uri())});
+const bridgeCalls = [];
+globalThis.Bun = {{ spawn: (args) => {{
+  bridgeCalls.push(args);
+  return {{stdout: new Response("{{}}").body, stderr: new Response("").body, exited: Promise.resolve(0)}};
+}} }};
 (async () => {{
   const hooks = await plugin.AwokiContinuity({{
     client: {{ app: {{ log: async () => {{}} }} }},
@@ -118,6 +123,22 @@ const plugin = await import({json.dumps(compiled.as_uri())});
     if (preserved.args.session_id !== "explicit-session") {{
       throw new Error(`${{tool}} overwrote an explicit session_id`);
     }}
+  }}
+  const emit = async (type, properties) => hooks.event({{event: {{type, properties}}}});
+  const sid = "session-turn-test";
+  await emit("message.updated", {{info: {{id: "u1", sessionID: sid, role: "user"}}}});
+  await emit("message.updated", {{info: {{id: "a1", sessionID: sid, role: "assistant", parentID: "u1", finish: "tool-calls"}}}});
+  await emit("message.part.updated", {{part: {{messageID: "a1", sessionID: sid, type: "text", text: "   "}}}});
+  await emit("message.updated", {{info: {{id: "u1", sessionID: sid, role: "user"}}}});
+  await emit("session.idle", {{sessionID: sid}});
+  const terminal = bridgeCalls.filter(a => a.includes("agent-turn-terminal")).at(-1);
+  if (!terminal || terminal[terminal.indexOf("--parent-message-id") + 1] !== "u1" || terminal.includes("--has-text")) {{
+    throw new Error("current-turn parent attribution or empty-text boundary failed");
+  }}
+  await emit("message.updated", {{info: {{id: "s1", sessionID: sid, role: "assistant", parentID: "u1", summary: true, finish: "stop"}}}});
+  await emit("session.idle", {{sessionID: sid}});
+  if (!bridgeCalls.filter(a => a.includes("agent-turn-terminal")).at(-1).includes("--is-summary")) {{
+    throw new Error("compaction summary was not distinguished from an answer");
   }}
 }})().catch((error) => {{
   console.error(error);

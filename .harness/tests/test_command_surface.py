@@ -139,10 +139,14 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertIn("AWOKI_EMBEDDING_BASE_URL=\n", dotenv)
         self.assertIn("embedding.example.invalid", dotenv)
 
-    def test_opencode_always_loads_command_contract(self) -> None:
+    def test_opencode_routes_to_on_demand_command_contract(self) -> None:
+        from jsonc import strip_jsonc
+
         for name in ("opencode.jsonc", "opencode.container.jsonc"):
-            text = (ROOT / name).read_text(encoding="utf-8")
-            self.assertIn('"docs/COMMANDS.md"', text, name)
+            config = json.loads(strip_jsonc((ROOT / name).read_text(encoding="utf-8")))
+            self.assertEqual(config["instructions"], [".harness/AGENT_CORE.md"], name)
+        self.assertIn("docs/COMMANDS.md", (ROOT / "AGENTS.md").read_text(encoding="utf-8"))
+        self.assertTrue((ROOT / "docs/COMMANDS.md").is_file())
 
     def test_command_documentation_lists_replacements(self) -> None:
         docs = (ROOT / "docs" / "COMMANDS.md").read_text(encoding="utf-8")

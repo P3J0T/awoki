@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Any
+from typing import Any, Literal, Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
 try:
     from mcp_runtime import installed_mcp_version
@@ -19,6 +21,7 @@ import burp
 import reliability
 import claim_graph
 from code_search.vector_store import code_collection_name
+from code_search.presentation import compact_search_response
 
 from harness_core import (
     HarnessPaths,
@@ -224,14 +227,48 @@ def project_source_default(source_id: str, name: str = "", session_id: str = "")
     return core_project_source_default(source_id=source_id, name=name, session_id=session_id)
 
 
+class CaptureItem(BaseModel):
+    """One note: summary 1–600 chars, details <=2000, lists <=12. Project/privacy settings belong to the outer call."""
+    model_config = ConfigDict(extra="forbid")
+    summary: str = Field(min_length=1, max_length=600)
+    details: str = Field(default="", max_length=2000)
+    kind: str = "observation"
+    sources: list[str | dict[str, Any]] = Field(default_factory=list, max_length=12,
+        description="Plain citations or exact saved evidence handles; no inferred bindings.")
+    evidence_refs: list[str] = Field(default_factory=list, max_length=12,
+        description="Copy ev_ handles from source windows. Merged into sources without dropping either field.")
+    based_on: list[str] = Field(default_factory=list, max_length=3,
+        description="Exact active cont_ notes this follows up. Copies their sources/caveats and caps confidence; not verification. Use correction + supersedes instead to resolve a caveat.")
+    confidence: Literal["low", "medium", "high"] | None = None
+    uncertainty: list[str] = Field(default_factory=list, max_length=12)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+    supersedes: list[str] = Field(default_factory=list, max_length=12)
+    state: str = ""
+
+
+def _capture_item_wire_schema(value: Any) -> Any:
+    # Some llama.cpp grammar builders reject bounded optional string/list
+    # fields. Keep all bounds enforced by CaptureItem + core validation, but
+    # advertise types/fields inline without numeric grammar constraints.
+    if isinstance(value, dict):
+        return {key: _capture_item_wire_schema(item) for key, item in value.items()
+                if key not in {"minLength", "maxLength", "minItems", "maxItems"}}
+    if isinstance(value, list):
+        return [_capture_item_wire_schema(item) for item in value]
+    return value
+
+
+CaptureItemInput = Annotated[CaptureItem, WithJsonSchema(_capture_item_wire_schema(CaptureItem.model_json_schema()))]
+
+
 @mcp.tool()
 def project_capture(
-    summary: str,
+    summary: str = "",
     name: str = "",
     details: str = "",
     kind: str = "observation",
     sources: list[Any] | None = None,
-    confidence: str = "medium",
+    confidence: str | None = None,
     sensitivity: str = "project",
     index_policy: str = "safe",
     tags: list[str] | None = None,
@@ -242,8 +279,11 @@ def project_capture(
     metadata: dict[str, Any] | None = None,
     allow_sensitive_plaintext: bool = False,
     session_id: str = "",
+    items: list[CaptureItemInput] | None = None,
+    evidence_refs: list[str] | None = None,
+    based_on: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Capture one concise continuity record. Generic saves should use the neutral default kind=observation; evidence-oriented finding/discovery labels are explicit. This never stores private chain-of-thought or silently falls back to legacy memory."""
+    """Save ordinary notes and lightweight investigation checkpoints; no formal task required. For a checkpoint load project-continuity, then use one reflection with question/scope, evidence, unknowns, lead status and next check. Single note: summary plus sources/evidence_refs/uncertainty. Batch: put ALL note fields, including sources/evidence_refs/uncertainty, INSIDE EACH items entry; only name/privacy/session are shared. If unsure, save separate single notes. Never drop evidence to retry. based_on=[cont_...] retains up to three active safe parents' sources/caveats and caps confidence; resolve caveats using correction + supersedes instead. Plain notes remain allowed/unbound. Confidence low/medium/high. Notes are not verified claims; batch writes are independent. No private reasoning."""
     return core_project_capture(
         summary=summary,
         name=name,
@@ -261,13 +301,18 @@ def project_capture(
         metadata=metadata,
         allow_sensitive_plaintext=allow_sensitive_plaintext,
         session_id=session_id,
+        items=[item.model_dump(exclude_unset=True) if isinstance(item, CaptureItem) else item for item in items] if items is not None else None,
+        evidence_refs=evidence_refs,
+        based_on=based_on,
     )
 
 
 @mcp.tool()
-def project_search(query: str, name: str = "", include_global: bool = False, limit: int = 10, session_id: str = "") -> dict[str, Any]:
-    """Search safe project continuity first, with clearly labeled optional global reusable knowledge."""
-    return core_project_search(query=query, name=name, include_global=include_global, limit=limit, session_id=session_id)
+def project_search(query: str = "", name: str = "", include_global: bool = False, limit: int = 10, session_id: str = "",
+                   record_ids: list[str] | None = None, section: str = "record", offset: int = 0, max_chars: int = 6000) -> dict[str, Any]:
+    """Search safe memory, or recover 1–3 exact notes with record_ids=[cont_...], no backend call. Previews can omit important details: follow next_calls until relevant sections are complete before saying a finding was not saved. Exact reads preserve caveats and scope; current sources do not prove the claim. Section pages: details, uncertainty, sources, likely_continuation, tags, supersedes."""
+    return core_project_search(query=query, name=name, include_global=include_global, limit=limit, session_id=session_id,
+                               record_ids=record_ids, section=section, offset=offset, max_chars=max_chars)
 
 
 @mcp.tool()
@@ -510,7 +555,7 @@ def project_task_checkpoint(
     task_id: str = "",
     session_id: str = "",
 ) -> dict[str, Any]:
-    """Checkpoint generic long-running project work. Use this for code/docs/research tasks; Burp task tools are Burp-only compatibility helpers."""
+    """Update an existing explicitly tracked generic task, or create one only when the user requests task tracking. NOT for 'checkpoint this investigation' or ordinary save/resume: load project-continuity and use project_capture(kind='reflection') instead. Never create a formal task merely to preserve findings/leads. Burp task tools are Burp-only compatibility helpers."""
     return core_project_task_checkpoint(
         title=title, name=name, status=status, current_step=current_step,
         completed_steps=completed_steps, remaining_steps=remaining_steps,
@@ -521,7 +566,7 @@ def project_task_checkpoint(
 
 @mcp.tool()
 def project_task_status(task_id: str = "", name: str = "", session_id: str = "") -> dict[str, Any]:
-    """Return the latest generic project-task checkpoint for deterministic continuation."""
+    """Read an explicitly tracked generic task. Ordinary investigation checkpoints use project_search; do not create a task to resume an investigation."""
     return core_project_task_status(task_id=task_id, name=name, session_id=session_id)
 
 
@@ -796,9 +841,11 @@ def reliability_finish(
 
 
 @mcp.tool()
-def reliability_status(run_id: str, name: str = "", session_id: str = "") -> dict[str, Any]:
-    """Return the durable state and report path for a reliability run."""
-    return reliability.get_run(HarnessPaths.from_env().root, run_id=run_id, name=name, session_id=session_id)
+def reliability_status(run_id: str, name: str = "", session_id: str = "",
+                       view: str = "full", offset: int = 0, limit: int = 12) -> dict[str, Any]:
+    """Read a reliability run. view=review gives bounded findings with exact machine-checked scopes, unverified interpretations and unknowns; follow next_call for remaining items. It does not recheck source freshness or certify saved paraphrases."""
+    return reliability.get_run(HarnessPaths.from_env().root, run_id=run_id, name=name, session_id=session_id,
+                               view=view, offset=offset, limit=limit)
 
 
 @mcp.tool()
@@ -1150,10 +1197,13 @@ def codebase_search(
     ``diagnostic_targets`` to inline exact deep-candidate records, or use
     ``code_diagnostics_trace`` for paged/targeted trace reads. Source previews
     are never stored in diagnostic traces. With ``capture_evidence=true``, Awoki
-    stores the returned search evidence plus any metadata-only deep trace as a
+    stores the canonical search evidence plus any metadata-only deep trace as a
     content-addressed project-local non-RAG artifact and returns ``evidence_ref``.
+    Normal ``peek``/``context`` views omit ranking telemetry and repeated stage
+    candidates AFTER evidence capture, without changing hits, source/graph identity,
+    warnings or backend state. ``view=full`` retains the detailed response.
     """
-    return core_codebase_search(
+    result = core_codebase_search(
         query=query,
         name=name,
         limit=limit,
@@ -1173,6 +1223,7 @@ def codebase_search(
         capture_evidence=capture_evidence, acceptance_run_id=acceptance_run_id,
         session_id=session_id,
     )
+    return compact_search_response(result, view=view)
 
 
 @mcp.tool()
@@ -1321,7 +1372,7 @@ def code_flow_graph(
 
 @mcp.tool()
 def code_source_window(
-    path: str,
+    path: str = "",
     name: str = "",
     start_line: int = 1,
     end_line: int = 0,
@@ -1331,8 +1382,9 @@ def code_source_window(
     repo: str = "",
     source_id: str = "",
     session_id: str = "",
+    evidence_ref: str = "",
 ) -> dict[str, Any]:
-    """Read a bounded hash-checked source range from the active structural index; giant lines are explicitly clipped."""
+    """Reopen a saved source with evidence_ref alone (no guessed path/range). Stale/missing refs fail explicitly. Or read path relative to repo/source root, e.g. repo='web', path='router.ts', NOT 'web/router.ts'. Returns citation, evidence_ref and reopen_call; clipping is explicit. Source freshness does not prove behavior."""
     return core_code_source_window(
         path=path,
         name=name,
@@ -1344,6 +1396,7 @@ def code_source_window(
         repo=repo,
         source_id=source_id,
         session_id=session_id,
+        evidence_ref=evidence_ref,
     )
 
 
@@ -1355,7 +1408,7 @@ def code_evidence_verify(
     source_id: str = "",
     session_id: str = "",
 ) -> dict[str, Any]:
-    """Verify whether a prior code_source_window evidence id still matches the current source and repository snapshot."""
+    """Check current source identity/freshness, not behavioral proof. Pass the exact short evidence_ref from code_source_window as evidence_id; legacy full tokens also work. Missing/corrupt/stale refs never count as verified."""
     return core_code_evidence_verify(
         evidence_id=evidence_id, name=name, repo=repo, source_id=source_id, session_id=session_id
     )
@@ -1477,11 +1530,12 @@ def cross_project_code_search(
     limit: int = 20,
     refresh_stale: bool = False,
 ) -> dict[str, Any]:
-    """Search code across an explicit project list, or all indexed projects only when all_indexed=true."""
-    return core_cross_project_code_search(
+    """User-approved cross-project discovery: projects must contain 1–8 exact IDs; all_indexed is disabled. Use codebase_search for multiple repositories in ONE project. Named scopes do not grant consent; OpenCode asks before this tool. Normal views are compact; full/diagnostics retain ranking detail."""
+    result = core_cross_project_code_search(
         query=query, projects=projects, all_indexed=all_indexed,
         mode=mode, view=view, limit=limit, refresh_stale=refresh_stale,
     )
+    return compact_search_response(result, view=view)
 
 
 @mcp.tool()

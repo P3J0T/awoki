@@ -369,6 +369,7 @@ def record_agent_terminal_turn(
     provider_id: str = "", model_id: str = "", agent_mode: str = "", error_type: str = "",
     step_finish_seen: bool = False, input_tokens: int = 0, output_tokens: int = 0, reasoning_tokens: int = 0,
     tool_executions_completed: int = 0,
+    parent_message_id: str = "", is_summary: bool = False,
 ) -> dict[str, Any]:
     return agent_runtime.terminal_turn(
         root, session_id, message_id=message_id, finish_reason=finish_reason,
@@ -376,6 +377,7 @@ def record_agent_terminal_turn(
         provider_id=provider_id, model_id=model_id, agent_mode=agent_mode, error_type=error_type,
         step_finish_seen=step_finish_seen, input_tokens=input_tokens, output_tokens=output_tokens, reasoning_tokens=reasoning_tokens,
         tool_executions_completed=tool_executions_completed,
+        parent_message_id=parent_message_id, is_summary=is_summary,
     )
 
 
@@ -412,34 +414,10 @@ def compaction_context(root: Path, session_id: str, *, max_chars: int = 24_000) 
     because HANDOFF.md is large.
     """
     project_id = project_workspace.current_project_id(root, session_id=session_id)
-    execution = (
-        "## Awoki execution invariants\n\n"
-        "These rules survive compaction. Awoki operation names such as project_*, code_*, "
-        "acceptance_run_*, reliability_*, session_* and repository_prepare_* are MCP interfaces, "
-        "not shell commands. Use the Awoki MCP for Awoki state/reliability/acceptance operations. In normal "
-        "repository investigation, use Awoki indexed/structural search for conceptual discovery, OpenCode Grep "
-        "for ordinary exact string/symbol lookup, and native rg through Bash when the full ripgrep CLI materially "
-        "helps with complex or exhaustive exact enumeration. Lexical results are discovery until confirmed from "
-        "authoritative source. During an active acceptance run, call acceptance_run_next after compaction and obey "
-        "its durable per-test contract; its native-tool restrictions override normal investigation ergonomics. "
-        "Outside an active machine-enforced contract, normal investigation may use OpenCode/native source tools "
-        "according to the source-navigation policy and the newest user instruction. allowed_actions/forbidden_actions "
-        "are workflow labels, not authorization grants. "
-        "Do not infer PASS from a shortened objective: acceptance_run_record machine-checks required interfaces, "
-        "tool provenance, evidence scope, and declared pass requirements. Never persist or reconstruct private reasoning."
-    )
-    reliability = (
-        "## Awoki reliability invariants\n\n"
-        "Treat model output and remembered conclusions as fallible. Verify concrete "
-        "source, configuration, runtime, test, and tool-state claims against observed "
-        "evidence. Never claim a check ran unless its result was observed. Separate "
-        "observation, inference, and hypothesis. Exploration may remain incomplete; "
-        "completion claims require evidence proportional to the claim. `/reliability-check` "
-        "is local-only; delivery actions require explicit `/ship-check` authorization. "
-        "Repository understanding is evidence-backed by default: use indexed discovery, "
-        "exact structural relationships, bounded hash-checked source, and selective atomic "
-        "claim validation. Semantic hits and raw grep previews are discovery only."
-    )
+    # Exactly the same compact policy that OpenCode loads at startup. Read only
+    # the installed harness file, never a target repository's instructions. A
+    # missing package file is an error, not permission to omit the invariants.
+    core_policy = Path(__file__).with_name("AGENT_CORE.md").read_text(encoding="utf-8").strip()
 
     # Reserve deterministic space for operational ledgers before generated project prose.
     work_budget = min(6_000, max(1_200, max_chars // 4))
@@ -447,8 +425,17 @@ def compaction_context(root: Path, session_id: str, *, max_chars: int = 24_000) 
     reference_budget = min(3_200, max(800, max_chars // 8))
     task_context = work_ledger.compact_context(root, session_id, max_chars=work_budget)
     acceptance_context = acceptance_runs.compact_context(root, session_id, max_chars=acceptance_budget)
+    acceptance_policy = (
+        "## Active acceptance contract\n\n"
+        "Call acceptance_run_next after compaction and after each record; obey its exact durable "
+        "per-test contract. Its native-tool restrictions override normal investigation ergonomics. "
+        "allowed_actions/forbidden_actions are workflow labels, not authorization grants. "
+        "Do not infer PASS from a shortened objective: acceptance_run_record machine-checks "
+        "interfaces, provenance, evidence scope and pass requirements. Recover rich captured "
+        "evidence by exact ID and report from acceptance_run_status, not conversational memory."
+    ) if acceptance_context else ""
     reference_context = reference_catalog.compact_context(root, project_id or "", session_id=session_id, max_chars=reference_budget)
-    fixed_sections = [section for section in (execution, task_context, acceptance_context, reference_context, reliability) if section]
+    fixed_sections = [section for section in (core_policy, task_context, acceptance_policy, acceptance_context, reference_context) if section]
     fixed_size = sum(len(section) for section in fixed_sections) + 2 * max(0, len(fixed_sections) - 1)
     project_budget = max(0, max_chars - fixed_size - 8)
 
@@ -473,7 +460,7 @@ def compaction_context(root: Path, session_id: str, *, max_chars: int = 24_000) 
 
     # Put durable operational state first so an unexpectedly small consumer-side
     # truncation preserves the exact work/acceptance continuation before prose.
-    sections = [section for section in (execution, task_context, acceptance_context, reference_context, project_context, reliability) if section]
+    sections = [*fixed_sections, *([project_context] if project_context else [])]
     context = "\n\n".join(sections).strip()
     acceptance_state = acceptance_runs.status(root, session_id=session_id)
     return {
@@ -539,6 +526,8 @@ def _parser() -> argparse.ArgumentParser:
     terminal.add_argument("--output-tokens", type=int, default=0)
     terminal.add_argument("--reasoning-tokens", type=int, default=0)
     terminal.add_argument("--tool-executions-completed", type=int, default=0)
+    terminal.add_argument("--parent-message-id", default="")
+    terminal.add_argument("--is-summary", action="store_true")
 
     compaction_trigger = sub.add_parser("compaction-trigger")
     compaction_trigger.add_argument("--session-id", required=True)
@@ -603,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
             provider_id=args.provider_id, model_id=args.model_id, agent_mode=args.agent_mode, error_type=args.error_type,
             step_finish_seen=args.step_finish_seen, input_tokens=args.input_tokens, output_tokens=args.output_tokens, reasoning_tokens=args.reasoning_tokens,
             tool_executions_completed=args.tool_executions_completed,
+            parent_message_id=args.parent_message_id, is_summary=args.is_summary,
         )
     elif args.command == "compaction-trigger":
         result = mark_compaction_trigger(root, args.session_id, trigger=args.trigger, source=args.source)

@@ -273,7 +273,7 @@
   },
   "release_version": "v0.1.7",
   "reliability": {
-    "always_loaded": "AGENTS.md plus docs/RELIABILITY.md via OpenCode instructions",
+    "always_loaded": "AGENTS.md plus .harness/AGENT_CORE.md via OpenCode instructions; detailed procedures on demand",
     "assessment_model": "flexible note/claim/hypothesis/observation/question/gap/contradiction/decision nodes with strict authority, evidence provenance, first-class relations, and lifecycle; notes are non-gating",
     "authoritative_spec": "docs/RELIABILITY.md",
     "commands": [
@@ -310,7 +310,7 @@
     "code_text_search": "policy-gated exhaustive ripgrep fallback with clean-index-manifest eligibility reuse, explicit include_ignored forensic mode, server-side materialized search cache, operation-budget resumption, multi-path scope, final match counting, bounded per-match previews, giant-line-safe byte offsets, snapshot-bound cursors, and explicit incomplete status on per-file timeout",
     "code_vector_materialization": "interactive code search never creates remote vectors implicitly; project_open/project_repo_add expose passive repository_index_advice and explicit project_refresh(include_code=true, include_qdrant=true) materialization. Transient embedding transport failures receive bounded worker-level retry/backoff and adaptive batch reduction; permanent auth/schema/dimension failures are not retried as transport errors. End-to-end readiness should use repository_prepare_* rather than model-chaining child jobs.",
     "codebase_search": "native structural code index with deterministic lexical/conceptual/exact routing, per-query FTS/Qdrant/reranker diagnostic controls, raw stage provenance, bounded verified structural candidate expansion, query-intent authority ranking, deterministic diversity, clean-Git snapshot reuse, bounded top-K metadata, and explicit reranker requested/attempted/applied telemetry; interactive search never rebuilds remote vectors implicitly; lexical FTS includes language-neutral identifier normalization plus a bounded local separator/camelCase text bridge before ordinary FTS+Qdrant fusion",
-    "cross_project_code_search": "requires an explicit project list or explicit all_indexed=true",
+    "cross_project_code_search": "requires 1–8 exact project IDs and client-side user approval; all_indexed=true is rejected",
     "durable_continuation": "Repository readiness correctness is project/repo/source-scoped in repository_prepare_* state, not chat-scoped. project_continuation_* is an optional session notification/resume layer that can wait on repository_prepare_status; failure to wake an idle OpenCode conversation does not affect repository preparation correctness.",
     "embedding_default": "remote OpenAI-compatible endpoint; no local embedding model weights",
     "fallback": "sqlite_fts and jsonl_scan remain available for exact continuity recall; embedding/Qdrant errors are reported and never fabricate semantic hits",

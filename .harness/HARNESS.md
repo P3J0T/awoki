@@ -1,6 +1,6 @@
 # Machine Harness Notes
 
-This file is always loaded by OpenCode. The complete machine-readable map is `.harness/manifest.json`. R9.1.6.18 is in stabilization/usefulness-evaluation mode; architecture expansion should be justified by observed real-work failures rather than added spec surface.
+This is an on-demand runtime reference. OpenCode always loads the compact `AGENTS.md` and `.harness/AGENT_CORE.md`; use this file when runtime/tool details are needed. The complete machine-readable map is `.harness/manifest.json`. Architecture expansion should be justified by observed real-work failures rather than added spec surface.
 
 Use `project_open` for named project work and `project_status` when session attachment or index freshness is unclear. Project memory shadows global memory. The user’s new direction overrides generated continuation suggestions.
 

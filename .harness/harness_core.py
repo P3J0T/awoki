@@ -32,6 +32,8 @@ import continuations
 import work_ledger
 import acceptance_runs
 import evidence_store
+import source_references
+import memory_recall
 import agent_runtime
 import reference_catalog
 
@@ -1878,6 +1880,7 @@ def _capture_reconciliation(
     details: str,
     kind: str,
     supersedes: list[str],
+    *, semantic_allowed: bool = True,
 ) -> dict[str, Any]:
     """Compare a proposed capture with current project memory without rewriting history."""
     proposed = _normalized_memory_text(f"{summary} {details}")
@@ -1905,7 +1908,9 @@ def _capture_reconciliation(
                 "negation": sorted(_memory_negation_signature(existing)),
             })
     semantic_checked = False
-    if _project_vector_is_current(pp):
+    # Exact local matches need no query embedding. Private captures must never
+    # send their text to a semantic duplicate checker.
+    if semantic_allowed and not any(row["normalized_text"] == proposed for row in matches) and _project_vector_is_current(pp):
         semantic_checked = True
         for hit in rag_backend.search_qdrant(
             summary,
@@ -1968,13 +1973,13 @@ def _capture_reconciliation(
 
 
 def project_capture(
-    summary: str,
+    summary: str = "",
     *,
     name: str = "",
     details: str = "",
     kind: str = "observation",
     sources: list[Any] | None = None,
-    confidence: str = "medium",
+    confidence: str | None = None,
     sensitivity: str = "project",
     index_policy: str = "safe",
     tags: list[str] | None = None,
@@ -1986,6 +1991,9 @@ def project_capture(
     allow_sensitive_plaintext: bool = False,
     session_id: str = "",
     paths: HarnessPaths | None = None,
+    items: list[dict[str, Any]] | None = None,
+    evidence_refs: list[str] | None = None,
+    based_on: list[str] | None = None,
 ) -> dict[str, Any]:
     paths = paths or HarnessPaths.from_env()
     ensure_dirs(paths)
@@ -1998,6 +2006,38 @@ def project_capture(
     pp = project_workspace_path(paths, project_id=project_id, session_id=session_id or None)
     if pp is None:
         return {"status": "not_found", "project_id": project_id}
+    if items is not None:
+        error = memory_recall.validate_items(items)
+        if summary or details or sources or evidence_refs or based_on or uncertainty or tags or supersedes or metadata or state or likely_continuation or confidence is not None or kind != "observation":
+            error = ("Use either a single note or items, not both. Put each note's sources, evidence_refs, "
+                     "uncertainty and other fields INSIDE its relevant item; only name/privacy/session are shared. "
+                     "Do not drop references or caveats to retry. If the mapping is unclear, save separate single notes.")
+        if error:
+            return {"status": "rejected", "project_id": project_id, "reason": error, "written": 0}
+        results = []
+        for item in items:
+            saved = project_capture(name=project_id, paths=paths, session_id=session_id,
+                                    sensitivity=sensitivity, index_policy=index_policy,
+                                    allow_sensitive_plaintext=allow_sensitive_plaintext, **item)
+            results.append({key: saved[key] for key in (
+                "status", "id", "summary", "confidence", "uncertainty", "sources",
+                "supersedes", "reason", "capture_advice", "invalid_sources", "exact_index_sync", "source_binding", "preservation", "unavailable_ids",
+            ) if key in saved})
+        ok = all(row.get("status") in {"captured", "duplicate"} for row in results)
+        return {"status": "captured" if ok else "partial", "project_id": project_id,
+                "items": results, "written": sum(row.get("status") == "captured" for row in results),
+                "atomic": False, "memory_boundary": memory_recall.BOUNDARY}
+    error = memory_recall.validate_evidence_refs(evidence_refs) or memory_recall.validate_based_on(based_on)
+    if based_on and (kind == "correction" or supersedes):
+        error = "Use based_on for a qualified follow-up, or correction + supersedes to replace a note; do not combine them."
+    if error:
+        return {"status": "rejected", "project_id": project_id, "reason": error, "written": 0}
+    # One canonical representation: aliases are merged before validation and
+    # reconciliation, never silently ignored when ordinary citations coexist.
+    sources = [*(sources or []), *(evidence_refs or [])]
+    if len(sources) > 100:
+        return {"status": "rejected", "project_id": project_id, "written": 0,
+                "reason": "At most 100 combined sources/evidence_refs are allowed; split the note instead of truncating reference bindings."}
     if allow_sensitive_plaintext:
         safe_summary, safe_details = summary, details
         safe_sources, safe_uncertainty = sources or [], uncertainty or []
@@ -2016,7 +2056,28 @@ def project_capture(
         # analysis non-retrievable. Explicit sensitivity/no_rag remains honored.
         effective_sensitivity = sensitivity
         effective_policy = index_policy
-    reconciliation = {"classification": "sensitive_explicit", "matches": []} if allow_sensitive_plaintext else _capture_reconciliation(pp, safe_summary, safe_details, kind, supersedes or [])
+    # Use the canonical policy normalization before deciding whether any remote
+    # duplicate query is allowed (including aliases, case and unknown policies).
+    effective_sensitivity = continuity._normalize_sensitivity(effective_sensitivity)
+    effective_policy = continuity._normalize_index_policy(effective_policy, effective_sensitivity)
+    inherited = {}
+    if based_on:
+        safe_records = {str(row.get("id")): row for row in project_workspace.view_safe_records(project_workspace.continuity_records(pp))}
+        inherited = memory_recall.inherit_qualifications(safe_records, based_on, safe_sources, safe_uncertainty, confidence)
+        if inherited["status"] != "ok":
+            return {**inherited, "project_id": project_id}
+        safe_sources, safe_uncertainty, confidence = inherited["sources"], inherited["uncertainty"], inherited["confidence"]
+    invalid_sources = source_references.memory_source_issues(paths.root, project_id, safe_sources)
+    if invalid_sources:
+        return {"status": "rejected", "project_id": project_id, "written": 0,
+                "reason": "Invalid evidence references; no note saved. Recover the exact reference in this project or reopen the source window. Do not invent or substitute handles.",
+                "invalid_sources": invalid_sources,
+                "capture_advice": ["Use session_work_status or reference_resolve to find actual saved references; inspect ambiguous matches. Plain notes without evidence remain allowed, but are not verified claims."]}
+    safe_sources = source_references.bind_memory_sources(paths.root, project_id, safe_sources)
+    reconciliation = {"classification": "sensitive_explicit", "matches": []} if allow_sensitive_plaintext else _capture_reconciliation(
+        pp, safe_summary, safe_details, kind, supersedes or [],
+        semantic_allowed=not based_on and effective_policy != "no_rag" and effective_sensitivity not in {"secret", "sensitive"},
+    )
     classification = str(reconciliation.get("classification") or "new")
     matches = reconciliation.get("matches") or []
     top_match = matches[0] if matches else {}
@@ -2027,11 +2088,49 @@ def project_capture(
             "reason": "The proposed memory may contradict a similar existing record. Review the match, then capture as a correction with supersedes when appropriate.",
             "reconciliation": reconciliation,
         }
+    effective_supersedes = list(supersedes or [])
+    same_claim = False
+    existing_record = {}
     if classification == "exact_restatement" and top_match.get("id"):
+        existing_record = next((r for r in project_workspace.continuity_records(pp)
+                                if r.get("id") == top_match["id"]), {})
         proposed_sources = continuity.normalize_sources(safe_sources)
         existing_sources = continuity.normalize_sources(top_match.get("sources") or [])
         new_sources = [source for source in proposed_sources if source not in existing_sources]
-        if not new_sources:
+        # Similar wording is not sufficient to merge different kinds or source
+        # identities. In particular, identical files in two repos are distinct.
+        old_scopes = {(str(s.get("repo") or ""), str(s.get("source_id") or "")) for s in existing_sources if s.get("repo") or s.get("source_id")}
+        new_scopes = {(str(s.get("repo") or ""), str(s.get("source_id") or "")) for s in proposed_sources if s.get("repo") or s.get("source_id")}
+        same_claim = bool(existing_record and existing_record.get("kind") == kind
+                          and str(existing_record.get("summary") or "").strip() == safe_summary.strip()
+                          and str(existing_record.get("details") or "").strip() == safe_details.strip()
+                          and (not based_on or (existing_record.get("metadata") or {}).get("based_on") == inherited.get("based_on"))
+                          and not (old_scopes and new_scopes and old_scopes != new_scopes))
+        if same_claim:
+            inherited_issues = source_references.memory_source_issues(paths.root, project_id, existing_sources)
+            if inherited_issues:
+                return {"status": "needs_review", "project_id": project_id, "written": 0,
+                        "reason": "Earlier note has invalid references. History was preserved; use an explicit correction with supersedes and recovered references instead of propagating it.",
+                        "invalid_sources": inherited_issues, "supersedes": [str(top_match["id"])]}
+            confidence = confidence if confidence is not None else str(existing_record.get("confidence") or "medium")
+            # Omitting caveats/sources on a restatement cannot erase them. An
+            # explicit correction with supersedes is how a caveat is resolved.
+            safe_sources = existing_sources + new_sources
+            safe_uncertainty = list(dict.fromkeys([*(existing_record.get("uncertainty") or []), *safe_uncertainty]))
+            tags = sorted(set(existing_record.get("tags") or []) | set(tags or []))
+            safe_continuation = safe_continuation or str(existing_record.get("likely_continuation") or "")
+            state = state or str(existing_record.get("state") or "")
+            proposed_record = continuity.make_record(
+                project_id, safe_summary, details=safe_details, kind=kind, sources=safe_sources,
+                confidence=confidence, sensitivity=effective_sensitivity, index_policy=effective_policy,
+                tags=tags, uncertainty=safe_uncertainty, likely_continuation=safe_continuation,
+                state=state, supersedes=existing_record.get("supersedes") or [],
+                metadata={"based_on": inherited.get("based_on") or (existing_record.get("metadata") or {}).get("based_on")},
+            )
+            unchanged = continuity.continuity_fingerprint(proposed_record) == continuity.continuity_fingerprint(existing_record)
+        else:
+            unchanged = False
+        if same_claim and unchanged:
             return {
                 "status": "duplicate",
                 "project_id": project_id,
@@ -2039,16 +2138,31 @@ def project_capture(
                 "summary": top_match.get("summary"),
                 "reconciliation": reconciliation,
                 "_write_status": "duplicate_skipped",
+                "sources": existing_sources,
+                "uncertainty": existing_record.get("uncertainty") or [],
+                "confidence": confidence,
+                "source_binding": memory_recall.source_binding(existing_sources),
+                **({"preservation": inherited["preservation"]} if inherited else {}),
             }
-        reconciliation["classification"] = "reinforcement"
+        reconciliation["classification"] = "metadata_revision" if same_claim and not new_sources else "reinforcement"
         reconciliation["reinforces"] = top_match.get("id")
-    effective_supersedes = list(supersedes or [])
+        if same_claim:
+            effective_supersedes = [str(top_match["id"])]
     if kind == "correction" and not effective_supersedes and reconciliation.get("matches"):
         candidate_id = str(reconciliation["matches"][0].get("id") or "")
         if candidate_id.startswith("cont_"):
             effective_supersedes = [candidate_id]
             reconciliation["auto_supersedes"] = candidate_id
     merged_metadata = dict(metadata or {})
+    # Only the explicit validated parameter establishes this lineage. Arbitrary
+    # metadata is not an alternate path around parent/privacy validation.
+    merged_metadata.pop("based_on", None)
+    if inherited:
+        merged_metadata["based_on"] = inherited["based_on"]
+    elif classification == "exact_restatement" and same_claim:
+        previous_lineage = (existing_record.get("metadata") or {}).get("based_on")
+        if previous_lineage:
+            merged_metadata["based_on"] = previous_lineage
     merged_metadata["memory_reconciliation"] = reconciliation
     if reconciliation.get("reinforces"):
         merged_metadata["reinforces"] = reconciliation["reinforces"]
@@ -2061,7 +2175,7 @@ def project_capture(
         details=safe_details,
         kind=kind,
         sources=safe_sources,
-        confidence=confidence,
+        confidence=confidence or "medium",
         sensitivity=effective_sensitivity,
         index_policy=effective_policy,
         tags=tags or [],
@@ -2072,7 +2186,22 @@ def project_capture(
         metadata=merged_metadata,
         allow_sensitive_plaintext=allow_sensitive_plaintext,
     )
-    return {"status": "captured" if saved.get("_write_status") == "appended" else "duplicate", "project_id": project_id, "reconciliation": reconciliation, **saved}
+    advice = []
+    if len(str(saved.get("details") or "")) > 2000:
+        advice.append("Long notes are saved intact but search shows previews. Prefer one observation per items entry; use project_search(record_ids=[id]) to recover full details.")
+    if any(not str(source.get("id") or "").startswith("ev_") for source in saved.get("sources") or []):
+        advice.append("Path-only sources are not verifiable handles. For code-backed observations copy sources=[evidence_ref] from code_source_window; do not invent references.")
+    if not based_on and classification not in {"exact_restatement", "correction", "sensitive_explicit"}:
+        safe_records = {str(row.get("id")): row for row in project_workspace.view_safe_records(project_workspace.continuity_records(pp))}
+        for match in matches[:3]:
+            previous = safe_records.get(str(match.get("id")), {})
+            if previous.get("uncertainty") or previous.get("sources"):
+                advice.append(f"Related note {match['id']} has sources or caveats not inherited by similarity. If this is its follow-up, use based_on=[\"{match['id']}\"]; otherwise keep the notes independent. This is a review hint, not a detected contradiction.")
+                break
+    return {"status": "captured" if saved.get("_write_status") == "appended" else "duplicate", "project_id": project_id,
+            "reconciliation": reconciliation, "capture_advice": advice, **saved,
+            "source_binding": memory_recall.source_binding(saved.get("sources") or []),
+            **({"preservation": inherited["preservation"]} if inherited else {})}
 
 
 def project_status(name: str = "", session_id: str = "", paths: HarnessPaths | None = None) -> dict[str, Any]:
@@ -2370,13 +2499,17 @@ def project_refresh(
 
 
 def project_search(
-    query: str,
+    query: str = "",
     *,
     name: str = "",
     include_global: bool = False,
     limit: int = 10,
     session_id: str = "",
     paths: HarnessPaths | None = None,
+    record_ids: list[str] | None = None,
+    section: str = "record",
+    offset: int = 0,
+    max_chars: int = 6000,
 ) -> dict[str, Any]:
     paths = paths or HarnessPaths.from_env()
     ensure_dirs(paths)
@@ -2386,6 +2519,21 @@ def project_search(
     pp = project_workspace_path(paths, project_id=project_id, session_id=session_id or None)
     if pp is None:
         return {"status": "not_found", "project_id": project_id}
+    records = {str(row.get("id")): row for row in project_workspace.view_safe_records(project_workspace.continuity_records(pp))}
+    if record_ids is not None:
+        if (not isinstance(record_ids, list) or not 1 <= len(record_ids) <= 3
+                or any(not isinstance(ref, str) or not ref.startswith("cont_") for ref in record_ids)
+                or section not in {"record", "details", "uncertainty", "sources", "likely_continuation", "tags", "supersedes"}
+                or (section != "record" and len(record_ids) != 1)):
+            return {"status": "rejected", "reason": "Pass 1–3 exact cont_ record IDs; a section page requires one ID."}
+        selected = [records[ref] for ref in dict.fromkeys(record_ids) if ref in records]
+        annotated = source_references.annotate_memory(paths.root, project_id, selected)
+        returned = [{**memory_recall.project_record(row, project_id, section=section, offset=offset, limit=max_chars),
+                     "source_freshness": row["source_freshness"]} for row in annotated]
+        return {"status": "ok", "project_id": project_id, "records": returned,
+                "unavailable_ids": [ref for ref in dict.fromkeys(record_ids) if ref not in records],
+                "retrieval": "canonical_safe_memory_only; no embedding, reranking or index refresh",
+                "memory_boundary": memory_recall.BOUNDARY}
     index_refresh = _ensure_project_exact_index_current(paths, project_id, session_id=session_id)
     project_fts = rag_backend.search_fts(project_fts_db(paths, project_id=project_id), query, scope="project", limit=limit)
     project_vec = (
@@ -2394,10 +2542,18 @@ def project_search(
         else []
     )
     project_fallback = _legacy_hits_to_rag(search_records(query, project_workspace.view_safe_records(project_workspace.continuity_records(pp)), limit=limit))
-    project_hits = rag_backend.merge_hits(project_fts, project_vec, project_fallback, limit=max(limit, 30))
+    project_hits = rag_backend.merge_hits(
+        *(memory_recall.canonical_hits(hits, records, project_id) for hits in (project_fts, project_vec, project_fallback)),
+        limit=max(limit, 30),
+    )
     project_hits = rag_backend.rerank_hits(query, project_hits, limit=limit)
-    for hit in project_hits:
+    recalled = source_references.annotate_memory(paths.root, project_id, [
+        records.get(str(hit.get("record_id") or ""), hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {})
+        for hit in project_hits
+    ])
+    for hit, memory in zip(project_hits, recalled):
         hit["source_scope"] = "project"
+        hit["source_freshness"] = memory["source_freshness"]
     global_hits: list[dict[str, Any]] = []
     if include_global:
         index_global(include_qdrant=False, paths=paths)
@@ -2433,6 +2589,8 @@ def project_search(
             "Project hits are authoritative only to the extent supported by their sources.",
             "Global hits are reusable knowledge, not project-established facts.",
             "Raw artifacts are not loaded automatically.",
+            "Source freshness is checked at recall, within a bounded budget; it does not verify behavioral claims.",
+            "Memory previews may omit details. Follow metadata.next_calls or use project_search(record_ids=[record_id]) before claiming a finding was not saved. Keep each observation's uncertainty and repository scope with its conclusion.",
         ],
     }
 
@@ -3124,7 +3282,7 @@ def code_flow_graph(
 
 
 def code_source_window(
-    path: str,
+    path: str = "",
     *,
     name: str = "",
     start_line: int = 1,
@@ -3136,6 +3294,7 @@ def code_source_window(
     source_id: str = "",
     session_id: str = "",
     paths: HarnessPaths | None = None,
+    evidence_ref: str = "",
 ) -> dict[str, Any]:
     """Read a bounded hash-checked source range from the active indexed repository."""
     paths = paths or HarnessPaths.from_env()
@@ -3143,8 +3302,13 @@ def code_source_window(
     if error:
         return error
     assert project_id is not None
+    if evidence_ref:
+        if path or start_line != 1 or end_line != 0 or refresh_index:
+            return {"status": "rejected", "reason": "Use evidence_ref alone to reopen its exact saved range; do not combine it with path/range/refresh_index."}
+        return source_references.reopen(paths, project_id, evidence_ref, repo=repo, source_id=source_id,
+                                        max_chars=max_chars, max_line_chars=max_line_chars, session_id=session_id)
     project_workspace.enable_code_index(paths.root, project_id)
-    return code_search.source_window(
+    result = code_search.source_window(
         paths,
         project_id,
         path,
@@ -3154,6 +3318,7 @@ def code_source_window(
         max_line_chars=max_line_chars,
         refresh_index=refresh_index, repo=repo, source=source_id,
     )
+    return source_references.capture(paths.root, project_id, result, session_id=session_id)
 
 
 def code_evidence_verify(
@@ -3171,7 +3336,16 @@ def code_evidence_verify(
     if error:
         return error
     assert project_id is not None
-    return code_search.verify_evidence(paths, project_id, evidence_id, repo=repo, source=source_id)
+    reference = evidence_id if evidence_id.startswith("ev_") else ""
+    if reference:
+        evidence_id, error = source_references.resolve(paths.root, project_id, reference)
+        if error:
+            return error
+    result = code_search.verify_evidence(paths, project_id, evidence_id, repo=repo, source=source_id)
+    result["verification_boundary"] = source_references.BOUNDARY
+    if reference:
+        result["evidence_ref"] = reference
+    return result
 
 
 def code_semantics_check(
@@ -3337,13 +3511,24 @@ def cross_project_code_search(
     refresh_stale: bool = False,
     paths: HarnessPaths | None = None,
 ) -> dict[str, Any]:
+    # Model-supplied all_indexed is not a user's scope authorization. Require a
+    # frozen, bounded list before any project enumeration or retrieval I/O.
+    try:
+        valid_scope = (not all_indexed and isinstance(projects, list) and 1 <= len(projects) <= 8
+                       and all(isinstance(value, str) and value.strip()
+                               and project_workspace.clean_project_id(value) == value for value in projects))
+    except ValueError:
+        valid_scope = False
+    if not valid_scope:
+        return {"status": "rejected", "reason": "Cross-project search requires 1–8 exact project IDs in projects; all_indexed is disabled. For repositories inside one project use codebase_search(name=project).",
+                "scope_authorization": "Named targets are not consent; the calling client must obtain user approval before invoking cross-project retrieval."}
     paths = paths or HarnessPaths.from_env()
     ensure_dirs(paths)
     return code_search.cross_project_search(
         paths,
         query,
-        projects=projects or [],
-        all_indexed=all_indexed,
+        projects=list(dict.fromkeys(projects)),
+        all_indexed=False,
         mode=mode,
         view=view,
         limit=limit,

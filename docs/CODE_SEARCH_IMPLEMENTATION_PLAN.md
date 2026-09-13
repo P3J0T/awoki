@@ -4,6 +4,12 @@
 **Final architecture:** one native Awoki structural code-search engine; no external code-index service and no runtime legacy/structural switch.  
 **Scope:** Native Awoki implementation only. No `open-codebase-index` dependency, process, storage format, or runtime integration.
 
+Historical plan, not the current tool contract: its `all_indexed`/`--all-indexed`
+proposal is superseded. Public cross-project discovery now requires 1–8 exact
+project IDs and native approval; `all_indexed=true` rejects. See
+[current scope rules](CODE_SEARCH.md) and
+[reliability boundaries](RELIABILITY.md#retrieval-input-and-failure-budgets).
+
 ## 1. Objective
 
 Upgrade Awoki's repository search from fixed-size text chunks into a native structural code-search subsystem with:

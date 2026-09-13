@@ -123,6 +123,11 @@ Query records may declare:
 - required retrieval backends;
 - optional branch checkout for Git fixtures.
 
+This describes the trusted engine-level evaluation schema, not user consent.
+The public `cross_project_code_search` tool rejects `all_indexed=true` and requires
+1–8 exact project IDs plus client-side approval. Evaluation scope does not grant
+that permission or authorize searching unrelated installed projects.
+
 Example:
 
 ```json

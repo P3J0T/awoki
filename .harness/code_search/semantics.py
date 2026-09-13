@@ -336,6 +336,7 @@ def check_go_semantics(operation: str, inputs: dict[str, Any] | None = None) -> 
     except ValueError as exc:
         return {"status": "rejected", "operation": op, "reason": str(exc)}
     result = _execute_probe(op, normalized)
+    result["inputs"] = normalized
     result["operation"] = op
     result["proof_scope"] = "allow-listed fixed Go language/standard-library helper; repository code was not executed"
     result["semantics_class"] = "language" if op in LANGUAGE_STABLE_OPERATIONS else "stdlib_or_runtime"

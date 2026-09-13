@@ -36,16 +36,15 @@
     }
   },
 
-  // Keep the model aware of the harness map without dumping all skill contents.
+  // AGENTS.md is loaded natively. Keep only the shared core always in context;
+  // AGENTS.md routes to the dense references and skills on demand.
   "instructions": [
-    "HARNESS.md",
-    ".harness/HARNESS.md",
-    "docs/COMMANDS.md",
-    "docs/RELIABILITY.md"
+    ".harness/AGENT_CORE.md"
   ],
 
   // Conservative defaults: ask before edits/bash. Adjust per trust level.
   "permission": {
+    "awoki_cross_project_code_search": "ask",
     "edit": "ask",
     "bash": "ask",
     "todowrite": "allow",

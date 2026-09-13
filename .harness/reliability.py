@@ -20,6 +20,7 @@ import acceptance_runs
 import claim_graph
 import evidence_store
 import safety
+import findings_review
 
 _ALLOWED_CHECK_STATUS = {"passed", "failed", "blocked", "skipped"}
 _ALLOWED_FINAL_STATUS = {"passed", "failed", "blocked", "reliably-paused"}
@@ -207,7 +208,13 @@ def _report_dir(root: Path, project_id: str) -> Path:
 
 
 def _json_path(root: Path, project_id: str, run_id: str) -> Path:
-    return _report_dir(root, project_id) / f"{run_id}.json"
+    if not findings_review.valid_run_id(run_id):
+        raise ValueError("Invalid reliability run ID")
+    directory = _report_dir(root, project_id)
+    path = directory / f"{run_id}.json"
+    if not path.resolve().is_relative_to(directory.resolve()):
+        raise ValueError("Reliability run must stay in the project's report directory")
+    return path
 
 
 def _markdown_path(root: Path, project_id: str, run_id: str) -> Path:
@@ -255,6 +262,7 @@ def _render_markdown(run: dict[str, Any]) -> str:
         f"- Project: `{run.get('project_id')}`",
         f"- Mode: `{run.get('mode')}`",
         f"- Status: **{run.get('status')}**",
+        f"- Verification boundary: {_reporting_boundary(run)['summary']}",
         f"- Started: {run.get('started_at')}",
         f"- Updated: {run.get('updated_at')}",
         f"- Subject: {(_subject_contract(run)).get('subject') or 'not specified'}",
@@ -285,7 +293,11 @@ def _render_markdown(run: dict[str, Any]) -> str:
     if not claims:
         lines.append("No structured claims recorded.")
     for claim in claims:
-        lines.append(f"- `{claim.get('claim_id')}` **{claim.get('status')}** {claim.get('repo_id') or '(project)'} :: {claim.get('subject')} / {claim.get('predicate')} = `{json.dumps(claim.get('value'), ensure_ascii=False, sort_keys=True, default=str)}`")
+        presentation = findings_review.review({"claims": [claim]})["items"][0]
+        lines.append(f"- `{claim.get('claim_id')}` **{presentation['label']}** (checked scope only)")
+        lines.append(f"  - Analyst wording (not certified): {claim.get('subject')} / {claim.get('predicate')} = `{json.dumps(claim.get('value'), ensure_ascii=False, sort_keys=True, default=str)}`")
+        lines.append(f"  - Exact checked scope: `{json.dumps(presentation['checked_scope'], ensure_ascii=False, sort_keys=True, default=str)}`")
+        lines.append("  - Historical observation; source freshness not rechecked by this report.")
         if claim.get("reason"):
             lines.append(f"  - {claim.get('reason')}")
     gate = run.get("claim_gate") or {}
@@ -296,6 +308,8 @@ def _render_markdown(run: dict[str, Any]) -> str:
     if not assessments:
         lines.append("No assessment nodes recorded.")
     for node in assessments:
+        label = findings_review.review({"assessments": [node]})["items"][0]["label"]
+        lines.append(f"- Review label: **{label}** — interpretation not machine-verified.")
         lines.append(f"- `{node.get('node_id')}` **{node.get('kind')} / {node.get('status')}** [{node.get('authority')}] {node.get('statement')}")
         refs = [str((ref or {}).get("evidence_ref") or "") for ref in (node.get("evidence_refs") or []) if isinstance(ref, dict)]
         if refs:
@@ -311,7 +325,7 @@ def _render_markdown(run: dict[str, Any]) -> str:
             )
     latest_checkpoint = run.get("latest_verification_checkpoint") or {}
     if latest_checkpoint:
-        lines.extend(["", "## Verification checkpoint", "", f"- Result: **{latest_checkpoint.get('result')}**", f"- Checkpoint: `{latest_checkpoint.get('checkpoint_id')}` iteration {latest_checkpoint.get('iteration')}"] )
+        lines.extend(["", "## Verification checkpoint", "", f"- Graph/evidence requirements result: **{latest_checkpoint.get('result')}** — not semantic proof.", f"- Checkpoint: `{latest_checkpoint.get('checkpoint_id')}` iteration {latest_checkpoint.get('iteration')}"] )
         for finding in latest_checkpoint.get("backend_reliability_findings") or []:
             lines.append(f"- Backend finding: `{finding.get('backend')}` / `{finding.get('failure_class')}` — {finding.get('reason')}")
     lines.extend(["", "## Unresolved risk and untested paths", ""])
@@ -321,7 +335,27 @@ def _render_markdown(run: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _reporting_boundary(run: dict[str, Any]) -> dict[str, Any]:
+    """Expose separate authorities, even when a check-only run legitimately passes."""
+    gate = _claim_gate(run)
+    checkpoint = run.get("latest_verification_checkpoint") or {}
+    claim_result = str(gate.get("result") or "NOT_APPLICABLE")
+    assessment_result = "STALE" if run.get("verification_stale") else str(checkpoint.get("result") or "NOT_RUN")
+    return {
+        "run_status": run.get("status"),
+        "structured_claims": claim_result,
+        "assessments": assessment_result,
+        "findings_review": {"tool": "reliability_status", "arguments": {
+            "run_id": run.get("run_id"), "name": run.get("project_id"), "view": "review"}},
+        "summary": (f"Run: {run.get('status')}; structured claims: {claim_result}; assessments: {assessment_result}. "
+                    "Recorded checks are observations, not machine-verifier receipts. "
+                    "NOT_APPLICABLE, INCONCLUSIVE and NOT_RUN do not verify findings. "
+                    "A passing assessment checkpoint does not upgrade inference to behavioral proof."),
+    }
+
+
 def _write_all(root: Path, run: dict[str, Any]) -> dict[str, Any]:
+    run["reporting_boundary"] = _reporting_boundary(run)
     project_id = str(run["project_id"])
     run_id = str(run["run_id"])
     json_path = _json_path(root, project_id, run_id)
@@ -905,9 +939,9 @@ def finish_run(
         elif claim_gate.get("status") == "failed":
             final = "failed"
             reason = "Structured claim gate failed: " + str(claim_gate.get("reason") or "claim conflict/refutation")
-        elif claim_gate.get("status") == "blocked" and str(run.get("mode") or "") == "ship":
+        elif claim_gate.get("status") == "blocked":
             final = "blocked" if requested != "reliably-paused" else "reliably-paused"
-            reason = "Structured claim gate blocked shipping: " + str(claim_gate.get("reason") or "claims not verified")
+            reason = "Structured claim gate blocked completion: " + str(claim_gate.get("reason") or "claims not verified")
         elif failed:
             final = "failed"
             reason = "One or more required checks failed: " + ", ".join(str(c.get("name")) for c in failed)
@@ -933,8 +967,9 @@ def finish_run(
             project_id,
             summary=f"Reliability run `{run_id}` finalized as {saved['status']}.",
             kind="artifact",
-            details=reason,
+            details=reason + " " + saved["reporting_boundary"]["summary"],
             sources=[{"type": "file", "path": saved["report_path"]}],
+            uncertainty=[findings_review.BOUNDARY],
             confidence="high",
             metadata={"reliability_run_id": run_id, "reliability_status": saved["status"]},
             refresh=True,
@@ -1022,7 +1057,17 @@ def aggregate_verdict(
     }
 
 
-def get_run(root: Path, *, run_id: str, name: str = "", session_id: str = "") -> dict[str, Any]:
+def get_run(root: Path, *, run_id: str, name: str = "", session_id: str = "",
+            view: str = "full", offset: int = 0, limit: int = 12) -> dict[str, Any]:
+    if view not in {"full", "review"}:
+        raise ValueError("reliability view must be full or review")
     project_id = _project_id(root, name=name, session_id=session_id)
     run = _read(_json_path(root, project_id, run_id))
-    return _write_all(root, run)
+    if run.get("project_id") != project_id or run.get("run_id") != run_id:
+        raise ValueError("Reliability run identity does not match the requested project/run")
+    if view == "review":
+        return findings_review.review(run, offset=offset, limit=limit)
+    # Status must not mutate a report merely because a remembered pointer is read.
+    return {**run, "reporting_boundary": _reporting_boundary(run),
+            "json_path": f"reports/reliability/{run_id}.json",
+            "report_path": f"reports/reliability/{run_id}.md"}

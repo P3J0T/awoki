@@ -2419,7 +2419,7 @@ class AgentRuntimeBoundaryTests(unittest.TestCase):
             self.assertNotIn("chain_of_thought", serialized.lower())
             self.assertEqual(
                 set(result["last_anomaly"]),
-                {"classification", "message_id", "finish_reason", "reasoning_present", "text_present", "tool_present", "provider_id", "model_id", "agent_mode", "error_type", "step_finish_seen", "input_tokens", "output_tokens", "reasoning_tokens", "tool_executions_completed", "observed_at"},
+                {"classification", "message_id", "parent_message_id", "is_summary", "finish_reason", "reasoning_present", "text_present", "tool_present", "provider_id", "model_id", "agent_mode", "error_type", "step_finish_seen", "input_tokens", "output_tokens", "reasoning_tokens", "tool_executions_completed", "observed_at"},
             )
             status = session_runtime_status("session-1", paths=paths)
             self.assertEqual(status["last_anomaly"]["model_id"], "qwen3.8-27b")
@@ -2465,6 +2465,7 @@ class AgentRuntimeBoundaryTests(unittest.TestCase):
             recovered = opencode_events.record_agent_terminal_turn(
                 root, "session-2", message_id="msg-b", finish_reason="stop",
                 has_reasoning=True, has_text=True, has_tool=False,
+                parent_message_id="user-recover",
             )
             self.assertFalse(recovered["unresolved_anomaly"])
             self.assertEqual(recovered["recovered_count"], 1)
@@ -2748,9 +2749,10 @@ class AcceptanceRunProgressionTests(unittest.TestCase):
             self.assertEqual(state["compaction_count"], 1)
             context = opencode_events.compaction_context(root, session_id, max_chars=12_000)["context"]
             self.assertIn("Awoki execution invariants", context)
-            self.assertIn("native rg through Bash", context)
+            self.assertIn("code_exact_search", context)
+            self.assertNotIn("native rg through Bash", context)
             self.assertIn("native-tool restrictions override normal investigation ergonomics", context)
-            self.assertIn("Outside an active machine-enforced contract", context)
+            self.assertIn("Call acceptance_run_next after compaction", context)
             self.assertIn("Current durable test contract", context)
             self.assertIn("corrective_actions_used", context)
             self.assertIn("current_acceptance_run", context)

@@ -38,13 +38,11 @@
   },
 
   "instructions": [
-    "HARNESS.md",
-    ".harness/HARNESS.md",
-    "docs/COMMANDS.md",
-    "docs/RELIABILITY.md"
+    ".harness/AGENT_CORE.md"
   ],
 
   "permission": {
+    "awoki_cross_project_code_search": "ask",
     "edit": "ask",
     "bash": "ask",
     "todowrite": "allow",

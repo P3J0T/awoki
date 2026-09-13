@@ -1024,7 +1024,7 @@ PY
         self.assertIn("awoki-runtime-env --profile burp", burp)
         self.assertIn("Live Burp remains the direct `mcp.burp`", burp)
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertIn("not a same-user sandbox", agents)
+        self.assertIn("not a same-user sandbox", " ".join(agents.split()))
 
     def test_repo_aware_mcp_tools_actually_use_repo_parameter(self) -> None:
         import ast
@@ -1219,7 +1219,10 @@ PY
             self.assertIn(required, plugin)
         self.assertNotIn("experimental.chat.system.transform", plugin)
         self.assertNotIn("output.system.push", plugin)
-        self.assertIn("Awoki execution invariants", bridge)
+        core_policy = (ROOT / ".harness" / "AGENT_CORE.md").read_text(encoding="utf-8")
+        self.assertIn('with_name("AGENT_CORE.md").read_text', bridge)
+        self.assertIn("Awoki execution invariants", core_policy)
+        self.assertIn("Awoki reliability invariants", core_policy)
         self.assertIn("work_ledger.compact_context", bridge)
         self.assertIn("acceptance_runs.compact_context", bridge)
         self.assertIn("acceptance-tool", bridge)
@@ -1231,7 +1234,7 @@ PY
         ):
             self.assertIn(tool, manifest["tools"]["projects"])
             self.assertIn(tool, plugin)
-        self.assertIn("newest user instruction", agents)
+        self.assertIn("newest user instruction", " ".join(agents.split()))
         self.assertIn("acceptance_run_status", skill)
         self.assertIn("acceptance_evidence_get", skill)
         self.assertIn("capture_evidence=true", skill)
@@ -1246,6 +1249,28 @@ PY
         self.assertIn('clean = clean.replace(/^awoki[.:_-]/i, "")', plugin)
         self.assertIn("acceptanceObservableOrchestrationTools", plugin)
         self.assertIn("acceptanceControlTools", plugin)
+
+    def test_lean_instructions_keep_core_and_route_to_complete_reference(self) -> None:
+        from jsonc import strip_jsonc
+
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        core = (ROOT / ".harness/AGENT_CORE.md").read_text(encoding="utf-8")
+        reference = (ROOT / "docs/AGENT_REFERENCE.md").read_text(encoding="utf-8")
+        for config in ("opencode.jsonc", "opencode.container.jsonc"):
+            cfg = json.loads(strip_jsonc((ROOT / config).read_text(encoding="utf-8")))
+            self.assertEqual(cfg["instructions"], [".harness/AGENT_CORE.md"])
+            self.assertEqual(cfg["compaction"], {"auto": True, "prune": False, "reserved": 10000})
+        self.assertLessEqual(len(agents) + len(core), 14_000)
+        self.assertLessEqual(len(core), 3_000)
+        for link in ("docs/RELIABILITY.md", "docs/CODE_SEARCH.md", "docs/AGENT_REFERENCE.md", "docs/BACKUP_RESTORE.md"):
+            self.assertIn(link, agents)
+            self.assertTrue((ROOT / link).is_file())
+        for invariant in ("repository_universe_complete=true", "toolchain_alignment", "capture_evidence=true", "awoki-dev-preflight", "no-RAG", "autonomously poll", "CONTENT_MANIFEST_BOUND"):
+            self.assertIn(invariant, agents)
+        # Dense safety/acceptance/runtime details were retained, not discarded.
+        for detail in ("prior_attempt_requirements", "Raw Qdrant", "core.ignoreStat", "runtime-dependencies.lock.json", "Burp", "Memory and sensitive values"):
+            # Some provenance detail lives in the original reliability reference.
+            self.assertTrue(detail in reference + (ROOT / "docs/RELIABILITY.md").read_text(encoding="utf-8"), detail)
 
     def test_bounded_self_verification_contract_is_exposed_without_rigidifying_semantics(self) -> None:
         manifest = json.loads((ROOT / ".harness" / "manifest.json").read_text(encoding="utf-8"))

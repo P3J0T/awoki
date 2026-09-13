@@ -39,7 +39,7 @@ KNOWN_KINDS = KNOWLEDGE_KINDS | UNCERTAINTY_KINDS | CONTINUATION_KINDS | {
 }
 SOURCE_KEYS = {
     "type", "path", "ref", "uri", "id", "label", "title", "description",
-    "location", "record_id", "run_id", "repo", "commit",
+    "location", "record_id", "run_id", "repo", "source_id", "commit",
     "line", "line_start", "line_end", "hash",
 }
 SOURCE_NUMERIC_KEYS = {"line", "line_start", "line_end"}
@@ -144,11 +144,19 @@ def normalize_sources(sources: Iterable[Any] | None) -> list[dict[str, Any]]:
             raw = source.strip()
             if not raw:
                 continue
-            item = {
+            item = {"type": "reference", "id": raw} if raw.startswith("ev_") else {
                 "type": "reference" if raw.startswith(SOURCE_REFERENCE_PREFIXES) else "file",
                 "ref" if raw.startswith(SOURCE_REFERENCE_PREFIXES) else "path": raw,
             }
         elif isinstance(source, Mapping):
+            # code_source_window names its handle evidence_ref. Accept that
+            # natural object spelling as well as id/ref or a plain handle.
+            # Conflicting aliases must never select one apparently-current ref.
+            aliases = [str(source[key]).strip() for key in ("id", "ref", "evidence_ref")
+                       if source.get(key) not in (None, "")]
+            if "evidence_ref" in source or any(value.startswith("ev_") for value in aliases):
+                valid = len(set(aliases)) == 1 and aliases[0].startswith("ev_")
+                source = {**source, "id": aliases[0] if valid else "ev_invalid_conflicting_source_handles"}
             item = {}
             for key, value in source.items():
                 clean_key = str(key).strip()
@@ -175,7 +183,10 @@ def normalize_sources(sources: Iterable[Any] | None) -> list[dict[str, Any]]:
                 item.pop("path", None)
         if item.get("ref"):
             clean_ref = str(item["ref"]).strip()[:1_000]
-            if clean_ref.startswith(SOURCE_REFERENCE_PREFIXES):
+            if clean_ref.startswith("ev_"):
+                item.setdefault("id", clean_ref)
+                item.pop("ref", None)
+            elif clean_ref.startswith(SOURCE_REFERENCE_PREFIXES):
                 item["ref"] = clean_ref
             else:
                 item.pop("ref", None)
@@ -202,7 +213,16 @@ def continuity_fingerprint(record: Mapping[str, Any]) -> str:
         "likely_continuation": record.get("likely_continuation"),
         "state": record.get("state"),
         "supersedes": record.get("supersedes"),
+        "confidence": record.get("confidence"),
+        "sensitivity": record.get("sensitivity"),
+        "index_policy": record.get("index_policy"),
+        "tags": record.get("tags"),
     }
+    # Preserve old fingerprints when absent, but do not deduplicate notes that
+    # explicitly derive from different parents and erase their lineage.
+    based_on = (record.get("metadata") or {}).get("based_on")
+    if based_on:
+        payload["based_on"] = based_on
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -303,7 +323,7 @@ def append_record(path: Path, record: Mapping[str, Any], dedupe_recent: int = 40
     the same automatic reflection concurrently.
     """
     item = dict(record)
-    fingerprint = str(item.get("fingerprint") or continuity_fingerprint(item))
+    fingerprint = continuity_fingerprint(item)
     item["fingerprint"] = fingerprint
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as handle:
@@ -322,7 +342,11 @@ def append_record(path: Path, record: Mapping[str, Any], dedupe_recent: int = 40
                 if isinstance(row, dict):
                     parsed.append(row)
             recent = parsed[-max(1, dedupe_recent):]
-            duplicate = next((r for r in reversed(recent) if r.get("fingerprint") == fingerprint), None)
+            # Recompute so pre-upgrade fingerprints remain compatible without
+            # rewriting the append-only history. Never dedupe against retired memory.
+            active_ids = {str(r.get("id")) for r in active_records(parsed)}
+            duplicate = next((r for r in reversed(recent) if str(r.get("id")) in active_ids
+                              and continuity_fingerprint(r) == fingerprint), None)
             if duplicate:
                 return {**duplicate, "_write_status": "duplicate_skipped"}
             handle.seek(0, os.SEEK_END)
@@ -417,14 +441,22 @@ def record_line(record: Mapping[str, Any], max_chars: int = 240) -> str:
     summary = _clean_text(record.get("summary"), max_chars)
     confidence = str(record.get("confidence") or "unknown")
     suffix = f" (confidence: {confidence})" if confidence in {"low", "unknown"} else ""
-    return f"- {summary}{suffix}"
+    record_id = str(record.get("id") or "")
+    caveats = [_clean_text(value, 160) for value in (record.get("uncertainty") or [])[:3]]
+    warning = "; caveats: " + " | ".join(caveats) if caveats else ""
+    if len(record.get("uncertainty") or []) > 3:
+        warning += "; more caveats in record"
+    if record.get("sources"):
+        warning += "; saved sources, recheck freshness before relying on code claims"
+    return f"- {summary}{suffix}{warning}" + (f" [{record_id}]" if record_id else "")
 
 
 def source_label(source: Mapping[str, Any]) -> str:
     path = source.get("path") or source.get("ref") or source.get("id") or ""
     kind = source.get("type") or "source"
     line = source.get("line")
-    text = f"{kind}: `{path}`" if path else str(kind)
+    repo = str(source.get("repo") or "")
+    text = f"{kind}: `{repo + '/' if repo else ''}{path}`" if path else str(kind)
     return f"{text}:{line}" if line else text
 
 

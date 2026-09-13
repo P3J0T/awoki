@@ -176,9 +176,11 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     providerID: string; modelID: string; agentMode: string; errorType: string;
     stepFinishSeen: boolean; inputTokens: number; outputTokens: number; reasoningTokens: number;
     toolExecutionsCompleted: number;
+    parentMessageID?: string; isSummary?: boolean;
   }
   const assistantTurns = new Map<string, AssistantTurnState>()
   const latestAssistantBySession = new Map<string, string>()
+  const latestUserBySession = new Map<string, string>()
   const nativeToolNames = new Set(["bash", "read", "write", "edit", "patch", "glob", "grep", "list", "task", "todowrite"])
   const acceptanceSessions = new Set<string>()
   const acceptanceObservableOrchestrationTools = new Set([
@@ -277,11 +279,11 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
   const updatePartState = (value: unknown) => {
     const mid = partMessageID(value)
     if (!mid) return
-    const current = assistantTurns.get(mid) ?? { messageID: mid, finish: "", hasReasoning: false, hasText: false, hasTool: false, providerID: "", modelID: "", agentMode: "", errorType: "", stepFinishSeen: false, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, toolExecutionsCompleted: 0 }
+    const current: AssistantTurnState = assistantTurns.get(mid) ?? { messageID: mid, finish: "", hasReasoning: false, hasText: false, hasTool: false, providerID: "", modelID: "", agentMode: "", errorType: "", stepFinishSeen: false, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, toolExecutionsCompleted: 0 }
     const part = eventPart(value) as any
     const type = String(part.type ?? "").toLowerCase()
     if (type === "reasoning" || type.includes("reasoning")) current.hasReasoning = true
-    else if (type === "text") current.hasText = true
+    else if (type === "text" && typeof part.text === "string" && part.text.trim()) current.hasText = true
     else if (type === "tool" || type.includes("tool")) current.hasTool = true
     else if (type === "step-finish") {
       current.stepFinishSeen = true
@@ -300,6 +302,7 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     if (!state) return
     const args = [
       "agent-turn-terminal", "--session-id", sid, "--message-id", state.messageID,
+      "--parent-message-id", state.parentMessageID || "",
       "--finish-reason", state.finish || "",
       "--provider-id", state.providerID || "", "--model-id", state.modelID || "", "--agent-mode", state.agentMode || "",
       "--error-type", state.errorType || "",
@@ -311,6 +314,7 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     if (state.hasReasoning) args.push("--has-reasoning")
     if (state.hasText) args.push("--has-text")
     if (state.hasTool) args.push("--has-tool")
+    if (state.isSummary) args.push("--is-summary")
     const result = await runBridge(args)
     if (result.runtime_state === "degraded") {
       await log("warn", "Awoki detected terminal assistant-turn anomaly", {
@@ -585,16 +589,21 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
         const role = messageRole(event)
         const mid = messageID(event)
         if (role === "user") {
-          const prior = latestAssistantBySession.get(sid)
-          if (prior) assistantTurns.delete(prior)
-          latestAssistantBySession.delete(sid)
+          if (mid !== latestUserBySession.get(sid)) {
+            const prior = latestAssistantBySession.get(sid)
+            if (prior) assistantTurns.delete(prior)
+            latestAssistantBySession.delete(sid)
+            latestUserBySession.set(sid, mid)
+          }
           await runBridge(["user-turn", "--session-id", sid, "--message-id", mid])
         } else if (role === "assistant" && mid) {
           const prior = latestAssistantBySession.get(sid)
           if (prior && prior !== mid) assistantTurns.delete(prior)
-          const current = assistantTurns.get(mid) ?? { messageID: mid, finish: "", hasReasoning: false, hasText: false, hasTool: false, providerID: "", modelID: "", agentMode: "", errorType: "", stepFinishSeen: false, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, toolExecutionsCompleted: 0 }
+          const current: AssistantTurnState = assistantTurns.get(mid) ?? { messageID: mid, finish: "", hasReasoning: false, hasText: false, hasTool: false, providerID: "", modelID: "", agentMode: "", errorType: "", stepFinishSeen: false, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, toolExecutionsCompleted: 0 }
           current.finish = messageFinish(event) || current.finish
           const info = messageInfo(event) as any
+          current.parentMessageID = typeof info.parentID === "string" ? info.parentID : current.parentMessageID
+          current.isSummary = info.summary === true || current.isSummary === true
           current.providerID = String(info.providerID ?? info.providerId ?? info.provider_id ?? current.providerID ?? "")
           current.modelID = String(info.modelID ?? info.modelId ?? info.model_id ?? current.modelID ?? "")
           current.agentMode = String(info.mode ?? current.agentMode ?? "")
@@ -635,6 +644,7 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
         const mid = latestAssistantBySession.get(sid)
         if (mid) assistantTurns.delete(mid)
         latestAssistantBySession.delete(sid)
+        latestUserBySession.delete(sid)
         clearTimer(sid)
         await runBridge(["checkpoint", "--session-id", sid, "--reason", "session.deleted", "--force", "--detach"])
         await runBridge(["continuation-cancel", "--session-id", sid, "--reason", "session_deleted"])

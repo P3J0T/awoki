@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from provider_auth import provider_auth_headers, provider_auth_settings, provider_error_summary
+import retrieval_limits
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{2,}")
 DEFAULT_VECTOR_SIZE = 768
@@ -22,6 +23,8 @@ DEFAULT_EMBEDDING_MODEL = "jina-code-embeddings"
 DEFAULT_RERANK_MODEL = ""
 _LAST_EMBEDDING_ERROR = ""
 _LAST_RERANK_ERROR = ""
+_LAST_EMBEDDING_FAILURE: dict[str, Any] = {}
+_LAST_RERANK_FAILURE: dict[str, Any] = {}
 _LAST_QDRANT_PROBE: dict[str, Any] = {
     "status": "not_probed",
     "available": None,
@@ -166,6 +169,8 @@ def retrieval_runtime_status() -> dict[str, Any]:
         "rerank": rerank_profile(),
         "last_embedding_error": _LAST_EMBEDDING_ERROR,
         "last_rerank_error": _LAST_RERANK_ERROR,
+        "last_embedding_failure": dict(_LAST_EMBEDDING_FAILURE),
+        "last_rerank_failure": dict(_LAST_RERANK_FAILURE),
         "degraded": bool(_LAST_EMBEDDING_ERROR or _LAST_RERANK_ERROR),
     }
 
@@ -296,6 +301,9 @@ def _openai_embed_texts(texts: list[str], cfg: EmbeddingConfig, *, is_query: boo
     }
     if base_url:
         client_kwargs["base_url"] = base_url
+    cooldown_key = retrieval_limits.provider_key(base_url or "openai", cfg.model, api_key)
+    if is_query:
+        retrieval_limits.check_cooldown(cooldown_key)
     client = OpenAI(**client_kwargs)
     kwargs: dict[str, Any] = {"model": cfg.model, "input": texts}
     if omit_authorization:
@@ -304,7 +312,14 @@ def _openai_embed_texts(texts: list[str], cfg: EmbeddingConfig, *, is_query: boo
         kwargs["extra_headers"] = {"Authorization": Omit()}
     if os.environ.get("AWOKI_VECTOR_SIZE", "").isdigit() and cfg.model.startswith("text-embedding-3"):
         kwargs["dimensions"] = vector_size()
-    response = client.embeddings.create(**kwargs)
+    try:
+        response = client.embeddings.create(**kwargs)
+    except Exception as exc:
+        if is_query:
+            retrieval_limits.note_rate_limit(cooldown_key, exc)
+        raise
+    finally:
+        client.close()
     vectors = [item.embedding for item in response.data]
     return [_normalize_vector(v) if cfg.normalize else [float(x) for x in v] for v in vectors]
 
@@ -319,7 +334,7 @@ def embed_texts(texts: Sequence[str], *, is_query: bool = False) -> list[list[fl
     clean = [t or "" for t in texts]
     prefix = cfg.query_prefix if is_query else cfg.document_prefix
     prepared = [prefix + t for t in clean]
-    global _LAST_EMBEDDING_ERROR
+    global _LAST_EMBEDDING_ERROR, _LAST_EMBEDDING_FAILURE
     try:
         if cfg.provider == "hash":
             vectors = [_hash_embedding(t, cfg.explicit_vector_size or vector_size()) for t in prepared]
@@ -332,9 +347,11 @@ def embed_texts(texts: Sequence[str], *, is_query: bool = False) -> list[list[fl
         else:
             raise RuntimeError(f"unsupported embedding provider {cfg.provider!r}; set AWOKI_EMBEDDING_PROVIDER=openai|hash")
         _LAST_EMBEDDING_ERROR = ""
+        _LAST_EMBEDDING_FAILURE = {}
         return vectors
     except Exception as exc:
         _LAST_EMBEDDING_ERROR = provider_error_summary(exc)
+        _LAST_EMBEDDING_FAILURE = retrieval_limits.error_metadata(exc)
         raise RuntimeError(_LAST_EMBEDDING_ERROR) from None
 
 
@@ -1103,6 +1120,9 @@ def search_qdrant(
 
 
 def _hit_key(h: dict[str, Any]) -> str:
+    record_id = str((h.get("metadata") or {}).get("id") or "")
+    if record_id.startswith("cont_"):
+        return f"memory:{h.get('scope')}:{h.get('project_id')}:{record_id}"
     if h.get("source_path") is not None or h.get("line") is not None:
         return f"{h.get('scope')}:{h.get('kind')}:{h.get('source_path')}:{h.get('line')}"
     return str(h.get("id") or f"{h.get('source_path')}:{h.get('line')}:{h.get('title')}")
@@ -1194,6 +1214,8 @@ def rerank_profile() -> dict[str, Any]:
         "top_n": _env_int("AWOKI_RERANK_TOP_N", 10, 1, 50),
         "timeout_seconds": _env_int("AWOKI_RERANK_TIMEOUT_SECONDS", 20, 1, 300),
         "max_document_chars": _env_int("AWOKI_RERANK_MAX_DOCUMENT_CHARS", 4000, 256, 20000),
+        "max_input_tokens": _env_int("AWOKI_RERANK_MAX_INPUT_TOKENS", 512, 32, 32768),
+        "tokenizer_path": os.environ.get("AWOKI_RERANK_TOKENIZER_PATH", "").strip(),
         "fail_mode": os.environ.get("AWOKI_RERANK_FAIL_MODE", "fallback").strip().lower(),
     }
 
@@ -1238,14 +1260,17 @@ def _remote_rerank_scores(query: str, documents: list[str], profile: dict[str, A
         }
         if profile.get("model"):
             payload["model"] = profile["model"]
-    response = httpx.post(
-        url,
-        json=payload,
-        headers=headers,
-        timeout=float(profile.get("timeout_seconds") or 20),
-        follow_redirects=False,
-    )
-    response.raise_for_status()
+    cooldown_key = retrieval_limits.provider_key(url, str(profile.get("model") or ""), api_key)
+    retrieval_limits.check_cooldown(cooldown_key)
+    try:
+        response = httpx.post(
+            url, json=payload, headers=headers,
+            timeout=float(profile.get("timeout_seconds") or 20), follow_redirects=False,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        retrieval_limits.note_rate_limit(cooldown_key, exc)
+        raise
     body = response.json()
     rows = body.get("results") if isinstance(body, dict) else body
     if not isinstance(rows, list):
@@ -1261,7 +1286,7 @@ def _remote_rerank_scores(query: str, documents: list[str], profile: dict[str, A
             numeric = float(score)
         except (TypeError, ValueError):
             continue
-        if 0 <= idx < len(documents):
+        if 0 <= idx < len(documents) and math.isfinite(numeric):
             parsed.append((idx, numeric))
     if not parsed:
         raise RuntimeError("reranker response contained no usable index/score pairs")
@@ -1297,9 +1322,11 @@ def rerank_hits(
                 "use AWOKI_RERANK_PROVIDER=http|tei"
             )
         documents = [_hit_rerank_text(h, int(profile["max_document_chars"])) for h in candidates]
-        global _LAST_RERANK_ERROR
+        documents, input_budget = retrieval_limits.fit_rerank_documents(query, documents, profile)
+        global _LAST_RERANK_ERROR, _LAST_RERANK_FAILURE
         scored = _remote_rerank_scores(query, documents, profile)
         _LAST_RERANK_ERROR = ""
+        _LAST_RERANK_FAILURE = {}
         seen: set[int] = set()
         reranked: list[dict[str, Any]] = []
         for idx, score in sorted(scored, key=lambda item: item[1], reverse=True):
@@ -1310,6 +1337,7 @@ def rerank_hits(
             item["rerank_backend"] = "remote_http"
             item["rerank_model"] = profile["model"]
             item["rerank_score"] = float(score)
+            item["rerank_input_budget"] = input_budget
             item["pre_rerank_score"] = float(item.get("score", 0.0) or 0.0)
             item["score"] = float(score)
             reranked.append(item)
@@ -1319,10 +1347,12 @@ def rerank_hits(
         return reranked[: max(1, min(int(limit), 50))]
     except Exception as exc:
         _LAST_RERANK_ERROR = provider_error_summary(exc)
+        _LAST_RERANK_FAILURE = retrieval_limits.error_metadata(exc)
         if str(profile.get("fail_mode")) == "error":
             raise RuntimeError(_LAST_RERANK_ERROR) from None
         out = [dict(h) for h in hits[:limit]]
         for h in out:
             h["rerank_error"] = provider_error_summary(exc)
             h["rerank_fallback"] = True
+            h["rerank_failure"] = retrieval_limits.error_metadata(exc)
         return out

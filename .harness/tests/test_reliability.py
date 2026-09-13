@@ -287,6 +287,38 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(gate["result"], "NOT_APPLICABLE")
         self.assertIn("no required structured claims", gate["reason"])
 
+    def test_check_only_pass_reports_no_machine_claim_verification(self) -> None:
+        run = reliability.start_run(self.root, name="OPPA-444", claim="Source reviewed", required_checks=["review"])
+        reliability.record_check(self.root, name="OPPA-444", run_id=run["run_id"], check_name="review",
+                                 status="passed", evidence="Observed source")
+        final = reliability.finish_run(self.root, name="OPPA-444", run_id=run["run_id"])
+        self.assertEqual(final["status"], "passed")
+        boundary = final["reporting_boundary"]
+        self.assertEqual(boundary["structured_claims"], "NOT_APPLICABLE")
+        self.assertEqual(boundary["assessments"], "NOT_RUN")
+        self.assertIn("do not verify findings", boundary["summary"])
+        self.assertIn(boundary["summary"], reliability._render_markdown(final))
+        self.assertEqual(reliability.get_run(self.root, name="OPPA-444", run_id=run["run_id"])["reporting_boundary"], boundary)
+
+    def test_declared_missing_claim_blocks_reliability_not_only_shipping(self) -> None:
+        run = reliability.start_run(self.root, name="OPPA-444", claim="Required proof", required_checks=["review"],
+                                    required_claims=["authorization"])
+        reliability.record_check(self.root, name="OPPA-444", run_id=run["run_id"], check_name="review",
+                                 status="passed", evidence="Observed source")
+        final = reliability.finish_run(self.root, name="OPPA-444", run_id=run["run_id"])
+        self.assertEqual(final["status"], "blocked")
+        self.assertEqual(final["reporting_boundary"]["structured_claims"], "BLOCKED")
+        self.assertEqual(reliability.aggregate_verdict(self.root, name="OPPA-444", reliability_run_id=run["run_id"])["overall_verdict"], "BLOCKED")
+        run = reliability.start_run(self.root, name="OPPA-444", claim="Required proof", required_checks=["review"],
+                                    required_claims=["authorization"])
+        reliability.record_check(self.root, name="OPPA-444", run_id=run["run_id"], check_name="review",
+                                 status="passed", evidence="Observed source")
+        reliability.record_claim(self.root, name="OPPA-444", run_id=run["run_id"], claim_id="authorization",
+                                 subject="callback", predicate="authorized", value=True, status="INCONCLUSIVE")
+        final = reliability.finish_run(self.root, name="OPPA-444", run_id=run["run_id"])
+        self.assertEqual(final["status"], "blocked")
+        self.assertEqual(final["claim_gate"]["blocked_claims"], ["authorization"])
+
     def test_subject_contract_requires_declared_claim_ids_and_properties_are_checks(self) -> None:
         run = reliability.start_run(
             self.root, name="OPPA-444", claim="Contracted verification",

@@ -162,6 +162,9 @@ class CoreTests(unittest.TestCase):
                 self.embeddings = Embeddings()
                 clients.append(self)
 
+            def close(self):
+                self.closed = True
+
         fake_openai = type("FakeOpenAIModule", (), {"OpenAI": FakeOpenAI})()
         cfg = rag_backend.EmbeddingConfig(
             provider="openai",
@@ -184,6 +187,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(clients[0].timeout, 30.0)
         self.assertEqual(clients[0].max_retries, 1)
         self.assertEqual(clients[0].default_headers, {"User-Agent": "awoki-runtime"})
+        self.assertTrue(clients[0].closed)
         self.assertEqual(vectors, [[0.6, 0.8]])
 
     def test_query_embedding_uses_short_no_retry_budget(self):
@@ -203,6 +207,9 @@ class CoreTests(unittest.TestCase):
                 self.embeddings = Embeddings()
                 clients.append(self)
 
+            def close(self):
+                self.closed = True
+
         fake_openai = type("FakeOpenAIModule", (), {"OpenAI": FakeOpenAI})()
         with patched_env(
             AWOKI_EMBEDDING_BASE_URL="http://embedding.example.invalid:8000/v1",
@@ -216,6 +223,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(vector, [1.0, 0.0])
         self.assertEqual(clients[0].kwargs["timeout"], 5.0)
         self.assertEqual(clients[0].kwargs["max_retries"], 0)
+        self.assertTrue(clients[0].closed)
 
     def test_openai_compatible_embedding_custom_header_omits_bearer_auth(self):
         class EmbeddingItem:
@@ -233,6 +241,9 @@ class CoreTests(unittest.TestCase):
                 self.kwargs = kwargs
                 self.embeddings = Embeddings()
                 clients.append(self)
+
+            def close(self):
+                self.closed = True
 
         class FakeOmit:
             pass

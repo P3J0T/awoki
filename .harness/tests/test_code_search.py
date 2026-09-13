@@ -179,6 +179,8 @@ class StructuralCodeSearchTests(unittest.TestCase):
                 window["evidence"]["evidence_id"], name="demo", source_id="smali", paths=paths
             )
             self.assertEqual(verified["verdict"], "CURRENT_SOURCE_CONTENT_MANIFEST_BOUND", verified)
+            short_verified = code_evidence_verify(window["evidence_ref"], name="demo", source_id="smali", paths=paths)
+            self.assertEqual(short_verified["verdict"], verified["verdict"])
 
             # Changing another file keeps the exact Auth bytes current but must
             # invalidate the corpus revision the evidence was bound to.

@@ -302,8 +302,11 @@ def validate_continuity_contract() -> None:
         assert required in plugin_text, f"continuity plugin missing durable continuation behavior: {required}"
     assert "setInterval" not in plugin_text, "continuity plugin must use bounded one-shot timers rather than interval polling"
     bridge_text = (ROOT / ".harness" / "opencode_events.py").read_text(encoding="utf-8")
-    assert "Awoki execution invariants" in bridge_text, "compaction context must reinject MCP/execution invariants"
-    assert "Awoki reliability invariants" in bridge_text, "compaction context must reinject reliability invariants"
+    core_text = (ROOT / ".harness" / "AGENT_CORE.md").read_text(encoding="utf-8")
+    assert 'with_name("AGENT_CORE.md").read_text' in bridge_text, "compaction must reuse the installed startup policy"
+    for required in ("Awoki execution invariants", "Awoki reliability invariants", "code_exact_search", "code_source_window", "code_semantics_check", "Never claim a check ran unless its result was observed", "no-RAG/secrets", "newest user instruction"):
+        assert required in core_text, f"shared core policy missing invariant: {required}"
+    assert len(core_text) <= 3_000, "shared core must leave room for operational continuity"
     assert "work_ledger.compact_context" in bridge_text, "compaction context must include durable operational TODO state"
     assert "acceptance_runs.compact_context" in bridge_text, "compaction context must include active structured acceptance state"
     assert "acceptance-tool" in bridge_text, "sanitized bridge must accept bounded acceptance tool provenance"
@@ -494,8 +497,11 @@ def validate_continuity_contract() -> None:
     assert (ROOT / ".opencode" / "skills" / "lavish-review" / "SKILL.md").exists(), "missing Lavish skill"
     for cfg_name in ("opencode.jsonc", "opencode.container.jsonc"):
         cfg = json.loads(_strip_jsonc((ROOT / cfg_name).read_text(encoding="utf-8")))
-        assert "docs/RELIABILITY.md" in cfg.get("instructions", []), f"{cfg_name} must always load reliability rules"
+        assert cfg.get("instructions") == [".harness/AGENT_CORE.md"], f"{cfg_name} must load shared core; dense procedures are on demand"
+        assert len(agents_text) + len(core_text) <= 14_000, "always-loaded instructions must remain bounded"
+        assert "docs/RELIABILITY.md" in agents_text and "docs/AGENT_REFERENCE.md" in agents_text, "compact instructions must route to complete procedures"
         assert cfg.get("permission", {}).get("skill", {}).get("*") == "allow", f"{cfg_name} must allow project skills"
+        assert cfg.get("permission", {}).get("awoki_cross_project_code_search") == "ask", f"{cfg_name} must request native approval before cross-project retrieval"
     runtime_snapshot = (ROOT / ".harness" / "bin" / "awoki-runtime-snapshot").read_text(encoding="utf-8")
     assert "AWOKI_OPENCODE_WEB_ENABLED" in runtime_snapshot and "AWOKI_OPENCODE_WEB_PORT" in runtime_snapshot, "runtime snapshot must carry non-secret Web routing config"
     assert "AWOKI_OPENCODE_WEB_PASSWORD" not in runtime_snapshot and "OPENCODE_SERVER_PASSWORD" not in runtime_snapshot, "runtime snapshot must never persist the Web password"

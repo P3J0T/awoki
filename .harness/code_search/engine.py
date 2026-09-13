@@ -2832,6 +2832,10 @@ def _rerank(
     out: list[dict[str, Any]] = []
     scored_count = 0
     for rank, item in enumerate(reranked, start=1):
+        if item.get("rerank_input_budget"):
+            telemetry["input_budget"] = item["rerank_input_budget"]
+        if item.get("rerank_failure"):
+            telemetry["failure"] = item["rerank_failure"]
         original = dict(row_map.get(str(item.get("id")), {}))
         if not original:
             continue

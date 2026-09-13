@@ -31,6 +31,44 @@ For a Burp claim, load `burp-workflow` and use direct Burp MCP for live state. D
 
 ## Reliability workflow
 
+### Focused findings review
+
+“Review/verify these findings before I act” (or `/verify these findings`) means a bounded
+review, not a new memory system or a gate on every note:
+
+1. Reuse a relevant run or `reliability_start(mode="verify")` with one concrete
+   required check: review the requested findings and their boundaries. Split
+   load-bearing conclusions into narrow claims/observations plus explicit gaps.
+   Check both alternatives: a delegated component may enforce its own checks,
+   or may actually lack them. Open the component/config when available; otherwise
+   record the missing evidence, not a guess. Compare docs to code only after
+   reading both; do not assume docs are wrong because another case had old docs.
+2. Reopen source and contradictory evidence. Use `reliability_verify_code_claim`
+   or `reliability_verify_semantics_claim` only for their supported exact scope.
+   Keep richer source interpretations as evidence-linked assessments, and use
+   gap/question nodes for unresolved behavior. Never replace the requested claim
+   with an easier structural fact and present that as the original claim proved.
+3. Record the observed review check, run the existing verification checkpoint,
+   and read `reliability_status(view="review")`; follow `next_call` until complete.
+   Use its labels: MACHINE_CHECKED/MACHINE_REFUTED apply only to `checked_scope`
+   at capture time; EVIDENCE_ATTACHED_UNVERIFIED is interpretation, not proof;
+   UNKNOWN/STALE/CONTRADICTED remain visible. An assessment checkpoint's raw
+   VERIFIED means graph/evidence requirements passed, not semantic verification.
+4. If needed, use at most the run's existing corrective budget for one relevant
+   correction, then checkpoint once more. Finalize as reliably-paused when required
+   unknowns remain. `reliability_finish` saves the ordinary report artifact with
+   qualifications. For later notes/checkpoints, preserve that report source or
+   use `based_on` with its continuity record; new wording inherits no verdict.
+5. On recall/compaction, reopen the linked review and relevant source before
+   relying on a conclusion. The report may have changed; its review hash describes
+   the current recorded items, not a certificate for an earlier paraphrase.
+
+This reviews what was recorded, not every possible omission. A small model can
+still miss an important unknown or misread code; consequential decisions may
+need independent review. Do not add ceremonial checks to casual exploration.
+
+### Full reliability run
+
 1. Define the exact claim: completed feature, validated analysis, or reliably paused investigation.
 2. Determine the work type and adapt the gate.
 3. Enumerate required checks before running them, then create a durable ledger with `reliability_start(mode="reliability")`.
@@ -42,7 +80,7 @@ For a Burp claim, load `burp-workflow` and use direct Burp MCP for live state. D
 9. If the checkpoint needs a corrective action, perform at most **one** safe high-value correction: call `reliability_consume_corrective_budget` before performing it, record the new evidence/assessment state, then run one final checkpoint. Checkpoints do not consume budget. Do not recursively reflect, repeat the same failing check, mutate source/configuration to make a claim pass, widen project scope, or restart failed backends without authorization.
 10. Review the deterministic claim gate plus the assessment checkpoint, privacy, indexing, source, correction, and uncertainty boundaries. `VERIFIED_WITH_FINDINGS` still surfaces contradictions/gaps/findings; a passing checkpoint does **not** turn model inference into machine proof.
 11. When composing a reliability run with an acceptance run, use `reliability_aggregate_verdict` so component verdicts and the overall result remain explicit.
-12. Produce a reliability report when the result is durable, then finalize with `reliability_finish`; required assessment state must have a current passing checkpoint while failed/missing checks and refuted/contradictory verified claims remain fail-closed.
+12. Produce a reliability report when the result is durable, then finalize with `reliability_finish`; required assessment state must have a current passing checkpoint while failed/missing checks and required missing/inconclusive/stale/refuted/contradictory claims remain fail-closed. Honor `reporting_boundary`: disclose inconclusive/error/unperformed verification in the final answer. Source freshness and a check-only pass do not prove behavioral findings.
 13. Do not push, create a PR, call CI, or publish.
 
 ### Code gate

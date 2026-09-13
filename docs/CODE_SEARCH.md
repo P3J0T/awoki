@@ -266,9 +266,15 @@ Result depth stays natural-language inside `/codebase`:
 /codebase show the complete implementation of duplicate callback handling
 ```
 
-Cross-project scope is never implicit. `all_indexed=true` is accepted only when
-the user explicitly asks for all indexed projects. Existing indexes are searched
-as-is; stale projects are rebuilt only when `refresh_stale=true` is explicit.
+Cross-project scope is never implicit. Supply 1–8 exact project IDs; the public
+tool rejects `all_indexed=true` before enumeration or backend calls. Default
+OpenCode configs ask for native approval of the named cross-project request;
+prefer approving once, since Always/allow overrides can cover future calls too.
+For multiple repositories inside one project, use `codebase_search` instead.
+Existing indexes are searched as-is; stale projects are rebuilt only when
+`refresh_stale=true` is explicit. Normal cross-project output is compact;
+`full`/`diagnostics` retain detailed ranking payloads. Alternate MCP clients must
+enforce their own user-consent boundary; this is not filesystem access control.
 
 Project opening and repository registration are passive for remote embeddings.
 They return `repository_index_advice` with per-repository structural/vector
@@ -333,6 +339,16 @@ truncation events rather than transport failures. The response includes a bounde
 `max_line_chars`), whether the requested range was complete, any clipped line
 numbers, and `continue_from_line`/a suggested continuation when more requested
 lines remain. Do not silently treat a truncated window as the complete range.
+
+Successful source windows also provide a copyable `citation` (`repo/path:start-end`)
+and a short `evidence_ref`. Pass that exact short ref as
+`code_evidence_verify(evidence_id="ev_...")`. The existing project evidence store
+persists only source-token/display metadata, not another copy of source text;
+these artifacts remain non-RAG. Used refs join the current session's working set
+for compaction recovery. Missing/corrupt/wrong-project refs fail closed; resolution
+still runs the ordinary source/revision verifier. If persistence is unavailable,
+the window remains readable with an explicit warning and its legacy token.
+Freshness verification does not prove behavior, and clipping/redaction still apply.
 
 Every successful source window also returns an `evidence_id` binding the project,
 commit/raw-tree identity when available, mutable Git-view fingerprint, path/range,
@@ -556,10 +572,30 @@ repositories receive explicit deterministic scope identifiers.
 
 `peek` returns locations and symbols with almost no source.
 
-`context` is the default and returns bounded structural evidence.
+`context` is the default and returns bounded source previews for discovery.
 
-`full` returns complete selected symbol chunks under hard per-symbol and total
-character limits. It does not dump arbitrary whole repositories.
+The MCP `codebase_search` response uses compact presentation for `peek` and
+`context`: it omits per-hit ranking telemetry, empty optional graph metadata, and
+repeated candidate lists from retrieval stages. It keeps the same ordered hits,
+source/repository/revision identities, previews and truncation markers, authority
+and parser/graph boundaries, freshness/assurance, backend state and failures.
+Unknown fields are preserved. This is a presentation change after retrieval and
+multi-source aggregation, not a different ranking/search algorithm. Internal
+engine/Python results and other source/graph tools are unchanged.
+
+`capture_evidence=true` stores the **canonical pre-presentation payload**, including
+ranking fields, before returning the compact result. Use the returned
+`evidence_capture.evidence_ref` with `acceptance_evidence_get` to inspect that exact
+past result without another search. `view=full` exposes detailed fields for a new
+search; it is not a replay and may differ if source/backend state changed. A
+`presentation` descriptor tells clients which fields were omitted. Clients that
+depend on ranking fields should use full/diagnostic views or captured evidence.
+`max_chars` remains a source-preview budget, not a total JSON size/token limit;
+warnings and identity are never cut to meet an arbitrary display budget.
+
+`full` retains the detailed response and returns selected symbol chunks under
+hard per-symbol and total source-character limits. It does not dump arbitrary
+whole repositories. `diagnostics` and error responses are unchanged.
 
 `diagnostics` is the retrieval-observability view. It omits source previews and
 serializes global backend/reranker/refinement telemetry and `stage_top` before

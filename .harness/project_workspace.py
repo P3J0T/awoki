@@ -1909,12 +1909,21 @@ def project_create(root: Path, name: str, session_id: str | None = None) -> dict
 
 def _resume_pack(pp: ProjectPaths) -> dict[str, Any]:
     meta = _meta(pp)
-    records = continuity_records(pp)
+    records = view_safe_records(continuity_records(pp))
     by_id = {str(r.get("id")): r for r in records}
     change_ids = meta["continuity"].get("last_snapshot_change_ids") or []
     changes = [by_id[str(record_id)] for record_id in change_ids if str(record_id) in by_id]
     recent_reflections = [r for r in records if r.get("kind") in {"reflection", "continuity_reflection"}][-6:]
     important = _knowledge_records(records, 12)
+    # Read-time annotations only. Generated prose stays explicitly a saved
+    # snapshot and never persists a freshness assertion into canonical memory.
+    import source_references
+    selected = changes + recent_reflections + important
+    checked = source_references.annotate_memory(pp.root, pp.project_id, selected)
+    checked_by_id = {str(row.get("id")): row for row in checked}
+    changes = [checked_by_id[str(row.get("id"))] for row in changes]
+    recent_reflections = [checked_by_id[str(row.get("id"))] for row in recent_reflections]
+    important = [checked_by_id[str(row.get("id"))] for row in important]
     sources = continuity.unique_sources(important + recent_reflections + changes, 16)
     uncertainties = _uncertainties(records, 10)
     continuations = _continuations(records, pp, 8)

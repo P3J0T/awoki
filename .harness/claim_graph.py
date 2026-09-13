@@ -4,6 +4,8 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+import safety
+
 ALLOWED_STATUSES = {"VERIFIED", "REFUTED", "INCONCLUSIVE", "STALE", "CONFLICT"}
 PASS_CAPABLE = {"VERIFIED", "REFUTED"}
 
@@ -15,10 +17,22 @@ def _canon(value: Any) -> str:
 def verifier_receipt(kind: str, result: Mapping[str, Any]) -> dict[str, Any]:
     payload = dict(result)
     raw = _canon(payload).encode("utf-8")
+    # Retain the actual checked proposition, not the caller's free-form label.
+    # Receipts describe an observation at capture time, never live freshness.
+    checked, _ = safety.redact_analysis_nested({
+        key: payload[key] for key in (
+            "claim", "language", "operation", "inputs", "observed", "expected",
+            "source", "project_id", "repo_id", "toolchain", "project_toolchain",
+            "semantics_class", "toolchain_alignment", "applicability", "certainty_boundary",
+            "proof_scope", "project_go",
+        ) if key in payload
+    })
     return {
+        "schema": 2,
         "kind": str(kind or "deterministic"),
         "sha256": hashlib.sha256(raw).hexdigest(),
         "verdict": str(payload.get("verdict") or payload.get("status") or ""),
+        "checked": checked,
         "summary": {
             key: payload.get(key)
             for key in (

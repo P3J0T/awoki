@@ -1,6 +1,6 @@
 ---
 name: project-continuity
-description: Primary Awoki workflow for naturally creating, resuming, continuing, searching, capturing, correcting, refreshing, pausing, or switching project work without requiring tasks or pending items.
+description: Create, resume, search, capture, correct, checkpoint an investigation, refresh, pause, or switch Awoki project work without requiring formal tasks or pending items.
 compatibility: opencode
 metadata:
   scope: project
@@ -50,12 +50,13 @@ supported by observable work and source references.
 - “Who calls SYMBOL?” / “What does SYMBOL call?” -> `code_callers` / `code_callees`
 - “Trace SOURCE to TARGET” -> `code_path`
 - broad “explain/trace how this input/file/request/tree is processed” -> `codebase_search`, resolve one entry point, then `code_flow_graph` + `code_source_window`; use `code_validate_claim` selectively for supported atomic claims
-- “Search PROJECTS for …” -> `cross_project_code_search` with explicit project scope
+- “Search PROJECTS for …” -> `cross_project_code_search` with 1–8 exact project IDs and native user approval; `all_indexed=true` is rejected. Multiple repos inside ONE project use `codebase_search`.
 - “Verify/validate this exact atomic code claim …” -> `code_validate_claim`
 - broad “verify this execution/tree/file-processing logic …” -> discover relevant source, decompose it into exact obligations, then call `code_validate_claim` per supported obligation
 - “Update the handoff/index/snapshot” -> `project_refresh`
+- “Checkpoint this investigation / save where we are / resume this investigation” -> the lightweight investigation checkpoint procedure below; no formal task is required
 - “Pause/save a whole-project handoff” -> `project_pause`
-- “Checkpoint/status/finalize this long-running task” -> `project_task_checkpoint` / `project_task_status` / `project_task_finalize`; Burp task tools are Burp-only
+- “Checkpoint/status/finalize this tracked long-running task” -> `project_task_checkpoint` / `project_task_status` / `project_task_finalize` only for an existing task identity; Burp task tools are Burp-only
 - “What project is active/is the index fresh?” -> `project_status`
 - “Prepare/prime/warm this repo for code review/full retrieval” -> load the `repository-readiness` skill; it starts/adopts one durable project/repo/source-scoped `repository_prepare_*` parent job, projects progress into OpenCode TODO, and treats conversation continuation as optional best-effort UX without weakening remote-upload consent
 
@@ -66,6 +67,71 @@ is unattached; do not attach it merely for background readiness. The durable par
 is independent of session attachment. If a different project is attached, optional
 conversation continuation for another project waits rather than auto-switching the
 user's active scope.
+
+## Lightweight investigation checkpoint
+
+Use this for an explicit checkpoint request, a meaningful discovery/correction,
+closing or changing an investigation branch, and before a planned pause or
+compaction. Do not save after every tool call or manufacture a checkpoint when
+nothing changed. Automatic compaction may interrupt before one can be written:
+capture important findings as they occur, not only at the end. This is an ordinary
+continuity procedure, not a formal acceptance gate or a new memory store.
+
+The user chooses the question, priorities and consequential actions. The model
+inspects evidence and drafts/saves concise records; do not ask the user to fill in
+a form or approve every note. Ask about material ambiguity or new authority.
+
+1. Reconcile the active question/scope with the newest user direction. Keep the
+   next few actions in native TODOs; they are temporary, not established knowledge.
+2. Capture useful observations individually (`project_capture`, optionally
+   `items=[...]`). Separate observed behavior from inference. Put returned
+   `evidence_ref` values in `sources`, and missing checks/dynamic boundaries in
+   `uncertainty` **at initial capture**. A citation, high confidence or current
+   source does not establish that the interpretation is true. If an important
+   check was not performed, say so; do not invent evidence to complete the note.
+3. Keep leads explicit: `unresolved`, `supported`, or `rejected`, with a short
+   evidence-based reason. To retire a saved lead, append `kind="correction"`,
+   `supersedes=[lead_id]`, `state="closed"`, and a summary starting `Rejected lead:`.
+   Retain the supporting sources and remaining caveats; leave its next action
+   empty. A supported lead needs an evidence-backed finding/correction, not a
+   relabelled guess. Reopen a rejected lead only on new evidence or user direction.
+4. Save one short orientation note using ordinary `project_capture` with
+   `kind="reflection"`, `tags=["investigation-checkpoint", "<topic>"]`, and a
+   recognizable summary such as `Checkpoint: <topic> — <bounded current position>`.
+   Aim for roughly 150–250 words, fewer for small tasks. Adapt/omit empty sections:
+
+   ```text
+   Question/scope: what we are investigating, which sources/revisions apply.
+   Established: narrow observations/findings and exact saved record/source refs.
+   Unknown/contradicted: missing checks, external boundaries, conflicting evidence.
+   Leads: unresolved/supported/rejected, with brief reasons and record refs.
+   Next check: the smallest useful check and what it would resolve.
+   ```
+
+   Use `details` for that outline, `uncertainty` for its load-bearing caveats and
+   `likely_continuation` for the next check. When deriving it from saved notes,
+   use `based_on=[cont_...]` for up to three relevant active safe records. Include
+   other exact record pointers in details and disclose omitted scope; never claim
+   automatic inheritance beyond those parents. Do not recursively summarize old
+   checkpoints instead of reading current findings/corrections. Checkpoints are
+   dated snapshots, not live dependencies: a parent correction does not update
+   existing snapshots. If an old checkpoint now misleads, explicitly correct it
+   with `supersedes`, carrying still-valid sources/caveats; do not combine that
+   operation with `based_on`. Preserve the append-only history.
+5. Inspect capture results (including partial/rejected items). Do not say “saved”
+   without an observed saved ID. Refresh generated views only when needed;
+   `project_pause` is for an actual pause/detach, not every checkpoint. Never edit
+   `SITUATION.md` or `HANDOFF.md` directly or create a parallel checkpoint database.
+
+On resume, open the intended project and use `project_search` for the checkpoint
+topic plus related corrections. Exact-read its record and important referenced
+notes with `record_ids`; follow pagination rather than trusting a preview. Select
+the latest **relevant** checkpoint, not the newest note from an unrelated branch.
+Reconcile `session_work_status`/TODOs with the user's current direction. Keep
+rejected leads rejected and unknowns unknown. Reopen load-bearing source evidence
+before strengthening a consequential conclusion, not every source on every turn.
+If notes are missing, stale or ambiguous, disclose the gap and ask or perform the
+smallest authorized check; do not reconstruct certainty from compacted chat.
 
 ## Compaction-safe operational continuity
 
@@ -138,6 +204,9 @@ reliability/verifier tools when proof is required.
 ## Agent-runtime recovery boundary
 
 `session_runtime_status` reports structural reasoning/text/tool terminal-turn metadata.
+Check `current_turn_complete`, not a previous terminal event or CLI exit code.
+New user turns await their own parent-attributed terminal text response; compaction
+summaries, denied/tool-only turns and missing idle events cannot inherit old success.
 `reasoning_only_terminal_turn` and `tool_execution_without_followup` are runtime
 degradation, not failed evidence. Never
 persist private reasoning content and do not consume a reliability corrective budget for
@@ -288,6 +357,38 @@ Use stronger labels only when they add meaning:
 - `artifact` / `reflection`: material or operational continuity
 
 A continuity record may also carry details, tags, uncertainty, likely continuation, and sources when those fields are useful. Missing optional fields are not a capture failure.
+
+For several investigation conclusions, prefer `project_capture(items=[...])`:
+one scoped observation per item, each with its own `sources=[evidence_ref]` from
+`code_source_window` and `uncertainty`. Keep the actual observed condition/outcome
+separate from unknown external behavior. This is optional batching of ordinary
+records, not a new claim ledger or a required form for casual notes. Batch writes
+are independent; inspect each result when the overall status is `partial`.
+If capture reports `invalid_sources`, recover the real handle with session/reference
+navigation or reopen the source. Never invent, fuzzy-replace or silently drop a
+reference to make capture succeed. Existing invalid history needs an explicit
+correction; casual unreferenced notes remain valid.
+`evidence_refs=[ev_...]` is also accepted and merged into `sources`, both for a
+single note and each typed item. Keep privacy settings at the batch top level.
+Capture returns `source_binding` (bound/mixed/unbound), never semantic proof.
+For a follow-up or summary of saved notes, use `based_on=[cont_...]` (up to three
+active safe notes in this project). Awoki retains their sources and uncertainty
+and prevents inherited confidence from increasing. Add new caveats/evidence as
+needed. This preserves qualifications, not semantic entailment. Missing, private,
+retired or invalid-source parents fail closed: recover the actual note instead
+of dropping its ID. To resolve a caveat, use a separate explicit `correction`
+with `supersedes`, not `based_on`. Similarity only suggests related notes; it
+never supplies a parent or evidence binding automatically. Casual independent
+notes still need no parent or source form.
+Reopen a saved source directly with `code_source_window(evidence_ref=ref)` or the
+returned `reopen_call`. Do not prepend the repo name to the repo-relative path.
+
+Search previews explicitly mark omitted material with `complete=false` and
+`next_calls`. Read `project_search(record_ids=["cont_..."])` to recover a current
+safe note without embedding/reranking or refreshing indexes. Follow returned
+section pages for long details, sources or caveats. Never infer that a prior
+finding was not saved from a truncated preview. Exact recall is saved knowledge,
+not verification: reopen load-bearing source before strengthening the conclusion.
 
 Record IDs (`cont_...`) are durable internal references. Keep them in tool results and stored records because corrections, supersession, deduplication, and diagnostics rely on them; do not require users to manage or quote IDs during ordinary saves.
 

@@ -1,5 +1,5 @@
 ---
-description: Open, inspect, refresh, search, save, or pause an Awoki project using natural language
+description: Open, inspect, search, save, checkpoint an investigation, refresh, or pause an Awoki project
 ---
 
 Use the `project-continuity` skill and interpret `$ARGUMENTS` as the user's project intent.
@@ -19,8 +19,9 @@ Route naturally:
 - "refresh code vectors", "vector refresh", or "materialize Qdrant for code" -> `code_vector_refresh_start`; report the job id and return control; use `code_vector_refresh_status` only on a later status request or when another requested action requires fresh state
 - save/remember/note something -> `project_capture`; default to neutral `kind="observation"`, and use a stronger kind only when the user explicitly states or clearly implies it
 - recall prior project knowledge -> `project_search`
+- checkpoint this investigation / save where we are / resume this investigation -> the `project-continuity` lightweight investigation checkpoint procedure; ordinary journal records, no formal task required
 - pause or hand off the project/session -> `project_pause`
-- checkpoint/status/finalize one long-running generic task -> `project_task_checkpoint` / `project_task_status` / `project_task_finalize`
+- checkpoint/status/finalize an existing tracked generic task -> `project_task_checkpoint` / `project_task_status` / `project_task_finalize`; do not create a task just to checkpoint an investigation
 - inspect/cancel optional conversation continuation -> `project_continuation_status` / `project_continuation_cancel`; repository-readiness may schedule it only as best-effort UX after the durable parent preparation job starts
 
 When no project is attached and the requested project name cannot be inferred, ask one concise question. Do not invent shell commands such as `awoki_project_refresh`, and do not use a transient Bash `export` to reconfigure an already-running MCP process.
@@ -35,6 +36,8 @@ Natural-language examples:
 /project remember that staging uses a separate issuer
 /project save this investigation result as a high-confidence finding with the file and line evidence
 /project what did we conclude about token replay?
+/project checkpoint this investigation
+/project resume the token replay investigation from its checkpoint
 /project pause and write a concise handoff
 ```
 

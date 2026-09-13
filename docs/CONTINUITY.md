@@ -227,6 +227,42 @@ dumped into context.
 
 ## Operational reflections
 
+### Lightweight investigation checkpoints
+
+Say **“checkpoint this investigation”** (or `/project checkpoint this investigation`).
+The `project-continuity` skill uses the existing journal, not a new file format,
+task requirement, or database. The model saves a short `reflection` tagged
+`investigation-checkpoint`: current question/scope, established observations with
+source/record references, unknowns or contradictions, lead status, and next check.
+Native TODOs hold the temporary action list. You steer direction and review
+consequential conclusions; you do not need to fill out or approve every note.
+
+Save discoveries with their caveats when first found. Checkpoint at meaningful
+milestones, branch changes, explicit requests, and before a planned pause or
+compaction, not every tool call. Unexpected automatic compaction cannot guarantee
+a last-minute model-authored checkpoint. Generated `SITUATION.md`/`HANDOFF.md`
+remain read-only projections; use ordinary captures, not hand edits.
+
+Leads remain unresolved, supported or rejected. Retire a disproved saved lead via
+an explicit correction with `supersedes`, `state="closed"`, supporting evidence,
+and a clear `Rejected lead:` summary; preserve remaining unknowns. Do not resume
+that lead without new evidence or explicit user direction. A lead becomes a
+finding only to the extent its evidence supports it.
+
+`based_on` preserves sources/caveats from up to three explicitly selected active
+safe records, not every note in the project. Checkpoints are snapshots: later
+corrections do not automatically rewrite descendants. Correct a misleading old
+checkpoint explicitly, retaining valid evidence and caveats. History remains
+append-only. Resume via targeted checkpoint/correction search and exact record
+reads; choose the latest relevant checkpoint, reconcile it with the newest user
+direction, and reopen evidence before strengthening consequential conclusions.
+Missing memory is a gap, not permission to reconstruct facts from a chat summary.
+
+This procedure helps the model record and resume work; it cannot verify arbitrary
+interpretations or recover qualifications the model never saved.
+
+### Event-driven reflections
+
 Awoki stores concise operational reflections, never hidden chain-of-thought.
 
 A reflection may state:
