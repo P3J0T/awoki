@@ -350,6 +350,16 @@ still runs the ordinary source/revision verifier. If persistence is unavailable,
 the window remains readable with an explicit warning and its legacy token.
 Freshness verification does not prove behavior, and clipping/redaction still apply.
 
+For durable notes, copy the returned `continuity_sources` array into
+`project_capture(sources=...)`, or use `sources=[evidence_ref]`. The nested
+`evidence.evidence_id` (`ev3z.`, `ev4z.`, or `ev5z.`) is a legacy verifier token,
+not a saved `ev_` reference. Continuity capture rejects those tokens even when
+supplied as a path or source-object ID. Path-like values must match the complete
+token format; ordinary filenames such as `ev5z.notes.md` remain allowed. Recover
+the exact short handle from the source-window result or reread the known window;
+do not remove its evidence to
+retry. Legacy tokens remain accepted by `code_evidence_verify`.
+
 Every successful source window also returns an `evidence_id` binding the project,
 commit/raw-tree identity when available, mutable Git-view fingerprint, path/range,
 exact source SHA-256, and the HEAD blob OID for tracked Git source. Use

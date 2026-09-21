@@ -4,8 +4,10 @@ A handle is navigation, not proof. Resolution always precedes the normal source
 verifier. Only the token and display metadata are persisted, never source text.
 """
 from pathlib import Path
+import re
 from typing import Any
 from types import SimpleNamespace
+from collections.abc import Mapping
 
 import evidence_store
 import work_ledger
@@ -41,6 +43,8 @@ def capture(root: Path, project_id: str, result: dict[str, Any], *, session_id: 
         output["evidence_reference_warning"] = str(stored.get("reason") or stored.get("status"))
         return output
     output["evidence_ref"] = stored["evidence_ref"]
+    output["continuity_sources"] = [stored["evidence_ref"]]
+    output["reference_usage"] = "For project_capture, copy continuity_sources into sources. evidence_ref is the durable ev_ handle; evidence.evidence_id is a legacy code_evidence_verify token, not a continuity source reference."
     output["reopen_call"] = {"tool": TOOL, "arguments": {"name": project_id, "evidence_ref": stored["evidence_ref"]}}
     output["path_format"] = "path is relative to the selected repo/source root; citation is a display label, not a path"
     if session_id:
@@ -98,14 +102,41 @@ def reopen(paths: Any, project_id: str, reference: str, *, repo: str = "", sourc
             "reopened": True, "reopened_from": reference}
 
 
-def memory_source_issues(root: Path, project_id: str, sources: list[Any]) -> list[dict[str, str]]:
+def legacy_source_issues(sources: list[Any]) -> list[dict[str, Any]]:
+    """Reject verifier tokens before normalization can clip/drop their identity.
+
+    Explicit ID aliases cannot hold legacy tokens, even malformed ones. Paths
+    need the complete token shape: a filename such as ev5z.notes.md is valid.
+    Do not decode/echo payloads or guess a replacement artifact.
+    """
+    issues = []
+    for index, source in enumerate(sources[:100]):
+        fields = {"source": source} if isinstance(source, str) else source if isinstance(source, Mapping) else {}
+        for field in ("source", "id", "ref", "evidence_ref", "evidence_id", "path", "uri"):
+            value = fields.get(field)
+            if not isinstance(value, str):
+                continue
+            value = value.strip()
+            explicit_id = field in {"id", "ref", "evidence_ref", "evidence_id"}
+            legacy = (value.startswith(("ev3z.", "ev4z.", "ev5z.")) if explicit_id
+                      else bool(re.fullmatch(r"ev[345]z\.[A-Za-z0-9_-]+\.[0-9a-fA-F]{16}", value)))
+            if legacy:
+                issues.append({"source_index": index, "field": field, "reason": "legacy_source_token",
+                    "instruction": "Use the source window's evidence_ref (ev_...) or continuity_sources in sources. Keep the legacy evidence_id for code_evidence_verify only. Recover the exact saved handle or reread the known source window; do not remove evidence to retry."})
+                break
+    return issues
+
+
+def memory_source_issues(root: Path, project_id: str, sources: list[Any]) -> list[dict[str, Any]]:
     """Validate declared handles before capture/reconciliation; never infer truth.
 
     Generic evidence is allowed. Stale source bytes remain valid historical
     evidence; freshness is checked separately at recall. Plain notes/paths need
     no artifact. We never search other projects or fuzzy-match a missing ID.
     """
-    issues = []
+    issues = legacy_source_issues(sources)
+    if issues:
+        return issues
     cache = {}
     for item in continuity.normalize_sources(sources):
         ref = str(item.get("id") or "")

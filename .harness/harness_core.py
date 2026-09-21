@@ -2061,13 +2061,16 @@ def project_capture(
     effective_sensitivity = continuity._normalize_sensitivity(effective_sensitivity)
     effective_policy = continuity._normalize_index_policy(effective_policy, effective_sensitivity)
     inherited = {}
-    if based_on:
+    # Inheritance normalizes sources; reject legacy verifier tokens before a
+    # ref-only object can disappear or a token string can become a clipped path.
+    invalid_sources = source_references.legacy_source_issues(safe_sources) if based_on else []
+    if based_on and not invalid_sources:
         safe_records = {str(row.get("id")): row for row in project_workspace.view_safe_records(project_workspace.continuity_records(pp))}
         inherited = memory_recall.inherit_qualifications(safe_records, based_on, safe_sources, safe_uncertainty, confidence)
         if inherited["status"] != "ok":
             return {**inherited, "project_id": project_id}
         safe_sources, safe_uncertainty, confidence = inherited["sources"], inherited["uncertainty"], inherited["confidence"]
-    invalid_sources = source_references.memory_source_issues(paths.root, project_id, safe_sources)
+    invalid_sources = invalid_sources or source_references.memory_source_issues(paths.root, project_id, safe_sources)
     if invalid_sources:
         return {"status": "rejected", "project_id": project_id, "written": 0,
                 "reason": "Invalid evidence references; no note saved. Recover the exact reference in this project or reopen the source window. Do not invent or substitute handles.",
