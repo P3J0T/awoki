@@ -172,15 +172,30 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
   const timers = new Map<string, ReturnType<typeof setTimeout>>()
   const idleSessions = new Set<string>()
   type AssistantTurnState = {
-    messageID: string; finish: string; hasReasoning: boolean; hasText: boolean; hasTool: boolean;
+    sessionID: string; messageID: string; finish: string; hasReasoning: boolean; hasText: boolean; hasTool: boolean;
     providerID: string; modelID: string; agentMode: string; errorType: string;
     stepFinishSeen: boolean; inputTokens: number; outputTokens: number; reasoningTokens: number;
     toolExecutionsCompleted: number;
     parentMessageID?: string; isSummary?: boolean;
+    infoSeen?: boolean; partsSeen?: boolean; lookupAttempted?: boolean; terminalRecorded?: boolean;
+    summaryParentVerified?: boolean; textCompleteSeen?: boolean;
+    compactionContinuation?: CompactionWitness;
+    activityVersion: number;
   }
+  type CompactionWitness = {
+    userMessageID: string; summaryMessageID?: string; markerMessageID?: string;
+    compacted: boolean; parentMessageID?: string; summaryCompletedAt?: number;
+  }
+  const compactions = new Map<string, CompactionWitness>()
+  const pendingUserChecks = new Map<string, Set<object>>()
+  const eventUserQueues = new Map<string, Promise<void>>()
+  const eventUserEpochs = new Map<string, object>()
   const assistantTurns = new Map<string, AssistantTurnState>()
   const latestAssistantBySession = new Map<string, string>()
   const latestUserBySession = new Map<string, string>()
+  const seenUsersBySession = new Map<string, Set<string>>()
+  const idleLookups = new Map<string, Promise<void>>()
+  const userRegistrations = new Map<string, Promise<Record<string, any>>>()
   const nativeToolNames = new Set(["bash", "read", "write", "edit", "patch", "glob", "grep", "list", "task", "todowrite"])
   const acceptanceSessions = new Set<string>()
   const acceptanceObservableOrchestrationTools = new Set([
@@ -276,10 +291,149 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     return typeof raw === "string" ? raw : ""
   }
 
-  const updatePartState = (value: unknown) => {
+  const newAssistantState = (sid: string, mid: string): AssistantTurnState => ({
+    sessionID: sid, messageID: mid, finish: "", hasReasoning: false, hasText: false, hasTool: false,
+    providerID: "", modelID: "", agentMode: "", errorType: "", stepFinishSeen: false,
+    inputTokens: 0, outputTokens: 0, reasoningTokens: 0, toolExecutionsCompleted: 0,
+    activityVersion: 0,
+  })
+
+  const observeAssistant = (sid: string, mid: unknown, activity = true): AssistantTurnState | undefined => {
+    if (!sid || typeof mid !== "string" || !mid || mid === latestUserBySession.get(sid)) return
+    const existing = assistantTurns.get(mid)
+    if (existing && existing.sessionID !== sid) return
+    const prior = latestAssistantBySession.get(sid)
+    if (prior && prior !== mid) assistantTurns.delete(prior)
+    const current = existing ?? newAssistantState(sid, mid)
+    if (activity) {
+      idleSessions.delete(sid)
+      current.activityVersion++
+      current.lookupAttempted = false
+    }
+    assistantTurns.set(mid, current)
+    latestAssistantBySession.set(sid, mid)
+    return current
+  }
+
+  const rememberNativeUser = (sid: string, mid: string) => {
+    const seen = seenUsersBySession.get(sid) ?? new Set<string>()
+    seen.add(mid)
+    seenUsersBySession.set(sid, seen)
+  }
+
+  const registerUser = async (sid: string, info: any, fromEvent = false) => {
+    const mid = info?.id
+    if (!sid || info?.sessionID !== sid || info?.role !== "user" || typeof mid !== "string" || !mid) return
+    const seen = seenUsersBySession.get(sid) ?? new Set<string>()
+    if (seen.has(mid)) return
+    compactions.delete(sid)
+    if (!fromEvent) {
+      eventUserEpochs.set(sid, {})
+      pendingUserChecks.delete(sid)
+    }
+    seen.add(mid)
+    seenUsersBySession.set(sid, seen)
+    idleSessions.delete(sid)
+    const prior = latestAssistantBySession.get(sid)
+    if (prior) assistantTurns.delete(prior)
+    latestAssistantBySession.delete(sid)
+    latestUserBySession.set(sid, mid)
+    const priorRegistration = userRegistrations.get(sid)
+    const registration = (async () => {
+      // Hook/event handlers can overlap. Preserve observed user order in the
+      // durable bridge even when an earlier process completes slowly.
+      await priorRegistration
+      return runBridge(["user-turn", "--session-id", sid, "--message-id", mid])
+    })()
+    userRegistrations.set(sid, registration)
+    await registration
+  }
+
+  const syntheticContinuation = (data: any, sid: string, mid: string): boolean => Boolean(
+    data?.info?.id === mid && data.info.sessionID === sid && data.info.role === "user"
+    && Array.isArray(data.parts) && data.parts.length > 0 && data.parts.length <= 16
+    && data.parts.every((part: any) => part && part.type === "text" && typeof part.text === "string"
+      && part.sessionID === sid && part.messageID === mid && part.synthetic === true
+      && part.metadata?.compaction_continue === true),
+  )
+
+  const registerEventUser = async (sid: string, info: any) => {
+    if (seenUsersBySession.get(sid)?.has(info?.id)) return
+    if (latestUserBySession.has(sid) && !compactions.has(sid) && !pendingUserChecks.has(sid)) return registerUser(sid, info, true)
+    // A fresh/recreated instance can first see a native synthetic user. Its
+    // role alone is insufficient. Established ordinary users stay fetch-free;
+    // initial and compaction-time classifications are serialized barriers.
+    if (info?.sessionID !== sid || info.role !== "user" || typeof info.id !== "string" || !info.id) {
+      compactions.delete(sid)
+      return
+    }
+    const epoch = eventUserEpochs.get(sid) ?? {}
+    eventUserEpochs.set(sid, epoch)
+    const check = {}
+    const pending = pendingUserChecks.get(sid) ?? new Set<object>()
+    pending.add(check)
+    pendingUserChecks.set(sid, pending)
+    const prior = eventUserQueues.get(sid)
+    const queued = (async () => {
+      await prior
+      if (eventUserEpochs.get(sid) !== epoch || seenUsersBySession.get(sid)?.has(info.id)) return
+      let classified = false
+      try {
+        const response = await client.session.message({path: {id: sid, messageID: info.id}, query: {directory}})
+        if (eventUserEpochs.get(sid) !== epoch) return
+        const data = response?.data
+        if (data?.info?.id !== info.id || data.info.sessionID !== sid || data.info.role !== "user"
+            || !Array.isArray(data.parts) || !data.parts.length || data.parts.length > 256
+            || data.parts.some((part: any) => !part || typeof part.type !== "string"
+              || part.sessionID !== sid || part.messageID !== info.id)) return
+        const marker = data.parts.every((part: any) => part.type === "compaction")
+        if (syntheticContinuation(data, sid, info.id) || marker) {
+          rememberNativeUser(sid, info.id)
+          const witness = compactions.get(sid)
+          if (marker && witness?.markerMessageID && witness.markerMessageID !== info.id) compactions.delete(sid)
+          classified = true
+          return
+        }
+        if (data.parts.some((part: any) => part.type === "compaction" || part.synthetic === true
+            || (part.type === "text" && typeof part.text !== "string"))) return
+        await registerUser(sid, data.info, true)
+        classified = true
+      } catch {
+        // Unknown user provenance cannot authorize completion of the older human.
+      } finally {
+        if (!classified && eventUserEpochs.get(sid) === epoch) compactions.delete(sid)
+      }
+    })()
+    eventUserQueues.set(sid, queued)
+    try { await queued } finally {
+      pending.delete(check)
+      if (!pending.size && pendingUserChecks.get(sid) === pending) pendingUserChecks.delete(sid)
+      if (eventUserQueues.get(sid) === queued) eventUserQueues.delete(sid)
+    }
+  }
+
+  const updateMessageState = (sid: string, info: any, activity = true) => {
+    if (info?.sessionID !== sid || info?.role !== "assistant") return
+    const current = observeAssistant(sid, info.id, activity)
+    if (!current) return
+    current.infoSeen = true
+    current.finish = messageFinish({ info }) || current.finish
+    current.parentMessageID = typeof info.parentID === "string" ? info.parentID : current.parentMessageID
+    current.isSummary = info.summary === true || current.isSummary === true
+    current.providerID = String(info.providerID ?? info.providerId ?? info.provider_id ?? current.providerID ?? "")
+    current.modelID = String(info.modelID ?? info.modelId ?? info.model_id ?? current.modelID ?? "")
+    current.agentMode = String(info.mode ?? current.agentMode ?? "")
+    const error = info.error && typeof info.error === "object" ? info.error : undefined
+    if (error) current.errorType = String(error.name ?? error.type ?? error.code ?? error.data?.name ?? current.errorType ?? "")
+  }
+
+  const updatePartState = (value: unknown, activity = true) => {
     const mid = partMessageID(value)
-    if (!mid) return
-    const current: AssistantTurnState = assistantTurns.get(mid) ?? { messageID: mid, finish: "", hasReasoning: false, hasText: false, hasTool: false, providerID: "", modelID: "", agentMode: "", errorType: "", stepFinishSeen: false, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, toolExecutionsCompleted: 0 }
+    const sid = sessionID(value)
+    if (!mid || !sid) return
+    const current = observeAssistant(sid, mid, activity)
+    if (!current) return
+    current.partsSeen = true
     const part = eventPart(value) as any
     const type = String(part.type ?? "").toLowerCase()
     if (type === "reasoning" || type.includes("reasoning")) current.hasReasoning = true
@@ -296,10 +450,107 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     assistantTurns.set(mid, current)
   }
 
+  const terminalMetadataReady = (state: AssistantTurnState | undefined): boolean => Boolean(
+    state?.infoSeen && state.parentMessageID && (state.finish || state.errorType || state.isSummary)
+    && (state.partsSeen || state.isSummary || state.errorType),
+  )
+
+  const recoverTerminalMetadata = async (sid: string) => {
+    // Older hosts deliver message/part updates; newer hosts may only deliver
+    // content deltas. Fetch one exact observed ID, never the session transcript.
+    while (idleLookups.has(sid)) await idleLookups.get(sid)
+    if (!idleSessions.has(sid)) return
+    const mid = latestAssistantBySession.get(sid) || ""
+    const user = latestUserBySession.get(sid) || ""
+    const state = assistantTurns.get(mid)
+    const needsParentVerification = state && state.parentMessageID !== user
+      && !(state.isSummary && state.summaryParentVerified) && !state.compactionContinuation
+    if (!state || (terminalMetadataReady(state) && !needsParentVerification) || state.lookupAttempted) return
+    const version = state.activityVersion
+    state.lookupAttempted = true
+    const stillCurrent = () => !pendingUserChecks.has(sid) && idleSessions.has(sid) && state.activityVersion === version && latestAssistantBySession.get(sid) === mid
+      && latestUserBySession.get(sid) === (user || undefined) && assistantTurns.get(mid) === state
+    const lookup = (async () => {
+      try {
+        const response = await client.session.message({ path: { id: sid, messageID: mid }, query: { directory } })
+        const data = response?.data
+        const info = data?.info
+        if (!stillCurrent() || !info || info.id !== mid || info.sessionID !== sid || info.role !== "assistant"
+            || typeof info.parentID !== "string" || !info.parentID || !Array.isArray(data.parts)
+            || data.parts.some(part => !part || typeof part !== "object" || typeof part.type !== "string"
+              || part.sessionID !== sid || part.messageID !== mid
+              || ((part.type === "text" || part.type === "reasoning") && typeof part.text !== "string")
+              || (part.type === "tool" && (!part.state || typeof part.state !== "object"
+                || !["pending", "running", "completed", "error"].includes(part.state.status))))) return
+        let summaryParentVerified = false
+        let continuation: CompactionWitness | undefined
+        if (info.summary === true && info.parentID !== user) {
+          // Native compaction can have a synthetic user parent. Validate only
+          // that exact identity; do not count it as a user turn or infer trigger.
+          const parentResponse = await client.session.message({
+            path: { id: sid, messageID: info.parentID }, query: { directory },
+          })
+          const parent = parentResponse?.data?.info
+          if (!stillCurrent() || parent?.id !== info.parentID || parent.sessionID !== sid || parent.role !== "user") return
+          summaryParentVerified = true
+        } else if (!user) return
+        else if (info.parentID !== user) {
+          const witness = compactions.get(sid)
+          if (!witness?.compacted || witness.userMessageID !== user || !witness.summaryMessageID
+              || !witness.markerMessageID || !Number.isFinite(witness.summaryCompletedAt) || (witness.parentMessageID && witness.parentMessageID !== info.parentID)
+              || info.parentID === witness.markerMessageID || mid === witness.summaryMessageID) return
+          const parentResponse = await client.session.message({
+            path: {id: sid, messageID: info.parentID}, query: {directory},
+          })
+          const parentCreated = parentResponse?.data?.info?.time?.created
+          const answerCreated = info.time?.created
+          if (!stillCurrent() || compactions.get(sid) !== witness
+              || !syntheticContinuation(parentResponse?.data, sid, info.parentID)
+              || typeof parentCreated !== "number" || !Number.isFinite(parentCreated)
+              || parentCreated < witness.summaryCompletedAt!
+              || typeof answerCreated !== "number" || !Number.isFinite(answerCreated) || answerCreated < parentCreated) return
+          witness.parentMessageID = info.parentID
+          rememberNativeUser(sid, info.parentID)
+          rememberNativeUser(sid, witness.markerMessageID)
+          continuation = witness
+        }
+        if (!stillCurrent()) return
+        const fresh = newAssistantState(sid, mid)
+        fresh.lookupAttempted = true
+        fresh.partsSeen = true  // The exact API returned the complete parts array, including an empty array.
+        fresh.summaryParentVerified = summaryParentVerified
+        fresh.compactionContinuation = continuation
+        assistantTurns.set(mid, fresh)
+        updateMessageState(sid, info, false)
+        for (const part of data.parts) updatePartState({ part }, false)
+        fresh.toolExecutionsCompleted = data.parts.filter(part => part.type === "tool" && part.state.status === "completed").length
+      } catch {
+        // SDK/API errors do not justify a guessed terminal receipt or transcript scan.
+      }
+    })()
+    idleLookups.set(sid, lookup)
+    try { await lookup } finally { if (idleLookups.get(sid) === lookup) idleLookups.delete(sid) }
+  }
+
   const recordTerminalTurn = async (sid: string) => {
+    if (!idleSessions.has(sid)) return
+    let registration: Promise<Record<string, any>> | undefined
+    do {
+      registration = userRegistrations.get(sid)
+      await registration
+      if (!idleSessions.has(sid)) return
+    } while (registration !== userRegistrations.get(sid))
+    const user = latestUserBySession.get(sid)
+    await recoverTerminalMetadata(sid)
+    if (!idleSessions.has(sid) || pendingUserChecks.has(sid) || latestUserBySession.get(sid) !== user) return
     const mid = latestAssistantBySession.get(sid) || ""
     const state = mid ? assistantTurns.get(mid) : undefined
-    if (!state) return
+    if (!state || state.terminalRecorded || !terminalMetadataReady(state) || state.sessionID !== sid) return
+    if (state.parentMessageID !== latestUserBySession.get(sid)
+        && !(state.isSummary && state.summaryParentVerified)
+        && !(state.compactionContinuation && compactions.get(sid) === state.compactionContinuation
+          && state.compactionContinuation.userMessageID === user)) return
+    state.terminalRecorded = true
     const args = [
       "agent-turn-terminal", "--session-id", sid, "--message-id", state.messageID,
       "--parent-message-id", state.parentMessageID || "",
@@ -315,6 +566,14 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     if (state.hasText) args.push("--has-text")
     if (state.hasTool) args.push("--has-tool")
     if (state.isSummary) args.push("--is-summary")
+    if (state.compactionContinuation && !state.isSummary) {
+      args.push("--compaction-continuation-of", state.compactionContinuation.userMessageID,
+        "--compaction-summary-message-id", state.compactionContinuation.summaryMessageID || "",
+        "--compaction-marker-message-id", state.compactionContinuation.markerMessageID || "")
+      // One terminal receipt consumes this observed continuation, not a reusable
+      // license to attribute other synthetic users to the original human.
+      compactions.delete(sid)
+    }
     const result = await runBridge(args)
     if (result.runtime_state === "degraded") {
       await log("warn", "Awoki detected terminal assistant-turn anomaly", {
@@ -523,9 +782,25 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
   setTimeout(() => void restorePendingContinuations(), 50)
 
   return {
+    "chat.message": async (input, output) => {
+      const parts = output.parts
+      if (parts?.length && (parts.every((part: any) => part.type === "compaction")
+          || parts.every((part: any) => part.type === "text" && part.synthetic === true
+            && part.metadata?.compaction_continue === true))) return
+      await registerUser(input.sessionID, output.message)
+    },
+
+    "experimental.text.complete": async (input) => {
+      const state = observeAssistant(input.sessionID, input.messageID)
+      if (state) state.textCompleteSeen = true
+    },
+
     "tool.execute.before": async (input, output) => {
       const rawTool = String(input.tool || "")
       const tool = normalizeTool(rawTool)
+      // Some host versions supply a top-level messageID on tool hooks. Never
+      // derive identity from tool arguments, output text or arbitrary metadata.
+      observeAssistant(input.sessionID, (input as any).messageID)
       if (input.sessionID) idleSessions.delete(input.sessionID)
       if (input.sessionID && acceptanceSessions.has(input.sessionID) && !acceptanceControlTools.has(tool)) {
         await runBridge([
@@ -548,6 +823,7 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
       if (!input.sessionID) return
       const rawTool = String(input.tool || "")
       const tool = normalizeTool(rawTool)
+      observeAssistant(input.sessionID, (input as any).messageID)
       if (acceptanceObservableOrchestrationTools.has(tool)) {
         acceptanceSessions.add(input.sessionID)
       }
@@ -589,29 +865,13 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
         const role = messageRole(event)
         const mid = messageID(event)
         if (role === "user") {
-          if (mid !== latestUserBySession.get(sid)) {
-            const prior = latestAssistantBySession.get(sid)
-            if (prior) assistantTurns.delete(prior)
-            latestAssistantBySession.delete(sid)
-            latestUserBySession.set(sid, mid)
-          }
-          await runBridge(["user-turn", "--session-id", sid, "--message-id", mid])
+          await registerEventUser(sid, messageInfo(event))
         } else if (role === "assistant" && mid) {
-          const prior = latestAssistantBySession.get(sid)
-          if (prior && prior !== mid) assistantTurns.delete(prior)
-          const current: AssistantTurnState = assistantTurns.get(mid) ?? { messageID: mid, finish: "", hasReasoning: false, hasText: false, hasTool: false, providerID: "", modelID: "", agentMode: "", errorType: "", stepFinishSeen: false, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, toolExecutionsCompleted: 0 }
-          current.finish = messageFinish(event) || current.finish
-          const info = messageInfo(event) as any
-          current.parentMessageID = typeof info.parentID === "string" ? info.parentID : current.parentMessageID
-          current.isSummary = info.summary === true || current.isSummary === true
-          current.providerID = String(info.providerID ?? info.providerId ?? info.provider_id ?? current.providerID ?? "")
-          current.modelID = String(info.modelID ?? info.modelId ?? info.model_id ?? current.modelID ?? "")
-          current.agentMode = String(info.mode ?? current.agentMode ?? "")
-          const error = info.error && typeof info.error === "object" ? info.error : undefined
-          if (error) current.errorType = String(error.name ?? error.type ?? error.code ?? error.data?.name ?? current.errorType ?? "")
-          assistantTurns.set(mid, current)
-          latestAssistantBySession.set(sid, mid)
+          updateMessageState(sid, messageInfo(event))
         }
+      } else if (String(event.type) === "message.part.delta") {
+        idleSessions.delete(sid)
+        observeAssistant(sid, (event as any)?.properties?.messageID)
       } else if (event.type === "message.part.updated") {
         idleSessions.delete(sid)
         const part = eventPart(event) as any
@@ -635,6 +895,9 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
         await runBridge(["checkpoint", "--session-id", sid, "--reason", "session.idle"])
         await syncContinuation(sid)
       } else if (event.type === "session.compacted") {
+        const witness = compactions.get(sid)
+        if (witness?.summaryMessageID && witness.markerMessageID
+            && witness.userMessageID === latestUserBySession.get(sid)) witness.compacted = true
         await runBridge(["compacted", "--session-id", sid])
         await runBridge(["checkpoint", "--session-id", sid, "--reason", "session.compacted", "--force"])
         await syncContinuation(sid)
@@ -645,15 +908,52 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
         if (mid) assistantTurns.delete(mid)
         latestAssistantBySession.delete(sid)
         latestUserBySession.delete(sid)
+        seenUsersBySession.delete(sid)
+        userRegistrations.delete(sid)
+        compactions.delete(sid)
+        pendingUserChecks.delete(sid)
+        eventUserEpochs.delete(sid)
+        eventUserQueues.delete(sid)
         clearTimer(sid)
         await runBridge(["checkpoint", "--session-id", sid, "--reason", "session.deleted", "--force", "--detach"])
         await runBridge(["continuation-cancel", "--session-id", sid, "--reason", "session_deleted"])
       }
     },
 
+    "experimental.compaction.autocontinue": async (input, output) => {
+      const sid = input.sessionID
+      const witness = compactions.get(sid)
+      const summaryID = latestAssistantBySession.get(sid)
+      const marker = input.message
+      if (!witness || output.enabled !== true || !summaryID || !assistantTurns.get(summaryID)?.textCompleteSeen || witness.summaryMessageID
+          || marker?.role !== "user" || marker.sessionID !== sid || !marker.id
+          || latestUserBySession.get(sid) !== witness.userMessageID) return
+      try {
+        // This native hook runs after the summary and before the synthetic user.
+        // Bind its exact marker to the observed summary; no text is persisted.
+        const response = await client.session.message({path: {id: sid, messageID: summaryID}, query: {directory}})
+        const info = response?.data?.info
+        if (compactions.get(sid) !== witness || latestUserBySession.get(sid) !== witness.userMessageID
+            || latestAssistantBySession.get(sid) !== summaryID || pendingUserChecks.has(sid)
+            || info?.id !== summaryID || info.sessionID !== sid || info.role !== "assistant"
+            || info.summary !== true || info.parentID !== marker.id || info.error
+            || !["stop", "end_turn"].includes(messageFinish({info}))
+            || typeof info.time?.completed !== "number" || !Number.isFinite(info.time.completed)) return
+        witness.summaryCompletedAt = info.time.completed
+        witness.summaryMessageID = summaryID
+        witness.markerMessageID = marker.id
+        rememberNativeUser(sid, marker.id)
+      } catch {
+        // Missing hook/API evidence leaves synthetic-parent attribution unknown.
+      }
+    },
+
     "experimental.session.compacting": async (input, output) => {
       const sid = sessionID(input)
       if (!sid) return
+      const user = latestUserBySession.get(sid)
+      if (user) compactions.set(sid, {userMessageID: user, compacted: false})
+      else compactions.delete(sid)
       await runBridge(["checkpoint", "--session-id", sid, "--reason", "session.compacting", "--force"])
       const result = await runBridge(["context", "--session-id", sid, "--max-chars", "24000"])
       const context = typeof result.context === "string" ? result.context : ""

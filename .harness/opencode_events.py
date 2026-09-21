@@ -370,6 +370,7 @@ def record_agent_terminal_turn(
     step_finish_seen: bool = False, input_tokens: int = 0, output_tokens: int = 0, reasoning_tokens: int = 0,
     tool_executions_completed: int = 0,
     parent_message_id: str = "", is_summary: bool = False,
+    compaction_continuation_of: str = "", compaction_summary_message_id: str = "", compaction_marker_message_id: str = "",
 ) -> dict[str, Any]:
     return agent_runtime.terminal_turn(
         root, session_id, message_id=message_id, finish_reason=finish_reason,
@@ -378,6 +379,9 @@ def record_agent_terminal_turn(
         step_finish_seen=step_finish_seen, input_tokens=input_tokens, output_tokens=output_tokens, reasoning_tokens=reasoning_tokens,
         tool_executions_completed=tool_executions_completed,
         parent_message_id=parent_message_id, is_summary=is_summary,
+        compaction_continuation_of=compaction_continuation_of,
+        compaction_summary_message_id=compaction_summary_message_id,
+        compaction_marker_message_id=compaction_marker_message_id,
     )
 
 
@@ -528,6 +532,9 @@ def _parser() -> argparse.ArgumentParser:
     terminal.add_argument("--tool-executions-completed", type=int, default=0)
     terminal.add_argument("--parent-message-id", default="")
     terminal.add_argument("--is-summary", action="store_true")
+    terminal.add_argument("--compaction-continuation-of", default="")
+    terminal.add_argument("--compaction-summary-message-id", default="")
+    terminal.add_argument("--compaction-marker-message-id", default="")
 
     compaction_trigger = sub.add_parser("compaction-trigger")
     compaction_trigger.add_argument("--session-id", required=True)
@@ -593,6 +600,9 @@ def main(argv: list[str] | None = None) -> int:
             step_finish_seen=args.step_finish_seen, input_tokens=args.input_tokens, output_tokens=args.output_tokens, reasoning_tokens=args.reasoning_tokens,
             tool_executions_completed=args.tool_executions_completed,
             parent_message_id=args.parent_message_id, is_summary=args.is_summary,
+            compaction_continuation_of=args.compaction_continuation_of,
+            compaction_summary_message_id=args.compaction_summary_message_id,
+            compaction_marker_message_id=args.compaction_marker_message_id,
         )
     elif args.command == "compaction-trigger":
         result = mark_compaction_trigger(root, args.session_id, trigger=args.trigger, source=args.source)

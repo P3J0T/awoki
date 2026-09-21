@@ -100,7 +100,11 @@ globalThis.Bun = {{ spawn: (args) => {{
 }} }};
 (async () => {{
   const hooks = await plugin.AwokiContinuity({{
-    client: {{ app: {{ log: async () => {{}} }} }},
+    client: {{ app: {{ log: async () => {{}} }}, session: {{ message: async (request) => {{
+      if (request.path.id !== "session-turn-test" || request.path.messageID !== "u1") throw new Error("unexpected initial-user lookup");
+      return {{data: {{info: {{id: "u1", sessionID: "session-turn-test", role: "user"}},
+        parts: [{{type: "text", text: "fixture user", sessionID: "session-turn-test", messageID: "u1"}}]}}}};
+    }} }} }},
     directory: process.cwd(),
   }});
   const tools = {json.dumps(CODE_SESSION_TOOLS)};

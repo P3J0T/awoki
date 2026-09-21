@@ -101,6 +101,9 @@ def terminal_turn(
     tool_executions_completed: int = 0,
     parent_message_id: str = "",
     is_summary: bool = False,
+    compaction_continuation_of: str = "",
+    compaction_summary_message_id: str = "",
+    compaction_marker_message_id: str = "",
 ) -> dict[str, Any]:
     """Record structural terminal-turn metadata only; never persist reasoning text."""
     if not session_id.strip() or not message_id.strip():
@@ -131,6 +134,12 @@ def terminal_turn(
             "tool_executions_completed": _count(tool_executions_completed),
             "observed_at": _now(),
         }
+        if compaction_continuation_of:
+            terminal["compaction_continuation"] = {
+                "user_message_id": str(compaction_continuation_of)[:240],
+                "summary_message_id": str(compaction_summary_message_id or "")[:240],
+                "marker_message_id": str(compaction_marker_message_id or "")[:240],
+            }
         # This function is called at OpenCode session.idle, so the turn is terminal even
         # when the provider/SDK omitted a finish reason. Reasoning with neither normal
         # text nor an executable tool part is therefore observable degradation by itself.
@@ -153,7 +162,19 @@ def terminal_turn(
         terminal["classification"] = classification
         state["last_terminal_turn"] = terminal
         current = dict(state.get("current_turn") or {})
-        matches = bool(parent_message_id and parent_message_id == current.get("user_message_id"))
+        direct_parent = bool(parent_message_id and parent_message_id == current.get("user_message_id"))
+        # The native plugin supplies this only after its bounded lifecycle and
+        # exact-parent checks. Keep the real native parent; never fabricate one.
+        continuation_parent = bool(
+            compaction_continuation_of and compaction_summary_message_id and compaction_marker_message_id
+            and compaction_continuation_of == current.get("user_message_id")
+            and parent_message_id and parent_message_id != compaction_continuation_of
+            and parent_message_id != compaction_marker_message_id
+            and message_id != compaction_summary_message_id
+        )
+        # Conflicting explicit continuation attribution cannot fall back to
+        # direct-parent equality (for example after a second host instance).
+        matches = continuation_parent if compaction_continuation_of else direct_parent
         if matches:
             current.update(status="incomplete" if anomaly else "completed", terminal_message_id=message_id[:240])
             state["current_turn"] = current

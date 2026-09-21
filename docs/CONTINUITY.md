@@ -306,6 +306,36 @@ OpenCode loads `.opencode/plugins/awoki-continuity.ts` automatically. The plugin
 - injects bounded project continuity, active session work/TODO state, current-session human references, active acceptance-run state, and reliability invariants into compaction context
 - fails open so plugin errors do not break OpenCode
 
+Hosts that omit durable message-update events are also supported through the
+actual user-message hook and observed assistant message IDs. At idle, when normal
+event metadata is incomplete, the plugin can read that exact message through the
+native SDK; it never lists the conversation. Session and parent identities must
+match before a terminal answer is recorded. A fresh plugin instance also checks
+the exact parts of its first event-only user before registration, so native
+synthetic users cannot become human turns after instance recreation. Direct
+user-message hooks and established ordinary event users remain fetch-free.
+A compaction summary stays distinct
+from an answer, with at most one additional exact parent read when needed.
+Only metadata and content-presence flags reach the bridge. Failed or stale reads
+leave completion unconfirmed, and overlapping events must not attach an old
+answer to a new user turn. This fallback does not infer a missing compaction
+trigger or write a delayed trigger into the next compaction.
+
+Native autocontinue may give the final answer a synthetic user parent. The plugin
+can attribute that answer to the still-current human only after observing the
+compacting hook, an exact completed summary matched to the autocontinue hook's
+marker, and the subsequent compacted event. It verifies the exact parent has
+only synthetic compaction-continuation text parts, and native timestamps order
+the summary, parent, and answer. The real parent ID remains in the receipt;
+separate `compaction_continuation` metadata records the original human, summary,
+and marker IDs. This witness is consumed once and invalidated by a newer or
+unreadable user event, deletion, or replacement compaction. Known native user IDs
+never become human turns on delayed event delivery. Summary receipts cannot
+complete the human turn. Missing hooks, timestamps, identity checks, or overflow
+replay without the autocontinue hook leave attribution unconfirmed. These are
+structural lifecycle checks, not evidence that the answer is correct; no private
+message text or inferred compaction trigger is persisted.
+
 Per-session state lives under:
 
 ```text
