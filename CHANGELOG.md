@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.1 — saved source references and native completion attribution (2026-09-22)
+
+- Returns copy-ready `continuity_sources` from source capture and rejects legacy verifier tokens in saved `sources`, evidence aliases and inherited `based_on` references before writing a note. Existing verifier tokens remain valid for verification; ordinary source paths and historical records retain their existing behavior.
+- Recovers missing native completion metadata by exact message ID and attributes an ordinary post-compaction response to the current human turn only when the observed summary, compaction marker and synthetic continuation form a consistent chain. Compaction summaries, stale/replayed events, errors and conflicting or incomplete linkage cannot complete that turn.
+- Keeps completion checks structural: no transcript scan or saved source/tool text is needed for attribution, and a completed turn does not establish that its answer is correct.
+- Public package version is `0.2.1`; internal harness version is `10.23`. SQLite schema 4 and `awoki-symbol-extraction-v5` are unchanged; no structural reindex or data migration is required by these fixes.
+- Native compatibility remains bounded by the observed OpenCode hooks and message identities. Automatic continuation with complete linkage is supported; overflow replay without that linkage remains incomplete. Live Qwen semantic/workflow limitations documented for v0.2.0 remain unresolved by this patch.
+
 ## v0.2.0 — qualified memory, findings review and shared runtime (2026-09-13)
 
 ### Retrieval and investigation continuity

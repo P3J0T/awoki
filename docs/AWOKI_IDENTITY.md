@@ -1,7 +1,7 @@
 # Awoki Identity — Dense Maintainer / Future-Context Brief
 
-**Release baseline:** v0.2.0
-**Harness version:** 10.22
+**Release baseline:** v0.2.1
+**Harness version:** 10.23
 **Current phase:** stabilization, real-work usefulness evaluation, simplification before further feature expansion
 
 This file is intentionally dense. It is for maintainers, future ChatGPT/OpenCode contexts, reviewers, and contributors who need to reconstruct Awoki's identity quickly without rereading the whole repository. It is **not** intended to be injected wholesale into every model turn.
@@ -328,5 +328,6 @@ Recent releases built the current foundation:
 - **v0.1.6: Qdrant readiness-path correction probing `qdrant:6333` from the same internal Docker network consumed by OpenCode, while retaining host-mode readiness as a generic fallback; validator and runtime regressions follow the delegated Qdrant-first launcher contract and extraction remains v4.**
 - **v0.1.7: Qdrant non-interactive readiness correction adding Compose `-T` to the stdin-fed Docker-network probe, with regression and validator coverage preventing TTY allocation from breaking automated startup; extraction remains v4.**
 - **v0.2.0: shared Web/TUI runtime, configuration and index-integrity fixes, compact retrieval/instructions, qualified memory/checkpoint recovery, and scoped findings review. Mechanical tests pass; live Qwen semantic/workflow acceptance did not pass, so use requires supervision. Extraction is v5; SQLite schema remains 4.**
+- **v0.2.1: rejects legacy verifier tokens as saved source references and preserves current-human completion attribution through observed native automatic compaction. Missing or conflicting linkage remains incomplete; structural completion does not certify an answer's correctness. Extraction remains v5; SQLite schema remains 4.**
 
 When a future context proposes another feature, compare it against this identity before implementing it.
