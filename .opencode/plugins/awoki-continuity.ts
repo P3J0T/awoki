@@ -381,7 +381,7 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
         const response = await client.session.message({path: {id: sid, messageID: info.id}, query: {directory}})
         if (eventUserEpochs.get(sid) !== epoch) return
         const data = response?.data
-        if (data?.info?.id !== info.id || data.info.sessionID !== sid || data.info.role !== "user"
+        if (!data || data.info?.id !== info.id || data.info.sessionID !== sid || data.info.role !== "user"
             || !Array.isArray(data.parts) || !data.parts.length || data.parts.length > 256
             || data.parts.some((part: any) => !part || typeof part.type !== "string"
               || part.sessionID !== sid || part.messageID !== info.id)) return

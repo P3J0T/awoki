@@ -55,6 +55,8 @@ jobs:
           npm install --prefix "$sdk_dir" --ignore-scripts --save-exact \
             typescript@7.0.2 @types/node@22.20.2 \
             "@opencode-ai/plugin@$sdk_version" "@opencode-ai/sdk@$sdk_version"
+          export PATH="$sdk_dir/node_modules/.bin:$PATH"
+          tsc --version
           AWOKI_PLUGIN_NODE_MODULES="$sdk_dir/node_modules" \
             python .harness/validate_opencode_plugin.py --require-sdk
       - name: Validate source and run regression suite
