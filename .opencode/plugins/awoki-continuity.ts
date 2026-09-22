@@ -886,7 +886,9 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
           ])
         }
         updatePartState(event)
-      } else if (event.type === "session.updated" || event.type === "session.status") {
+      } else if (event.type === "session.status") {
+        // Session metadata updates can follow idle while exact reads are in
+        // flight. Only execution status and actual activity invalidate idle.
         idleSessions.delete(sid)
       } else if (event.type === "session.idle") {
         idleSessions.add(sid)

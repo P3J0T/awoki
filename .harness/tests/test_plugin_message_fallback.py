@@ -79,7 +79,36 @@ const witness = async (uid = "u1") => {
   await autocontinue(); await compacted();
 };
 
-if (scenario === "normal") {
+if (scenario === "session_metadata_after_idle") {
+  for (const phase of ["answer", "synthetic"]) {
+    await witness("human-" + phase); await delta("answer");
+    let release;
+    lookup = request => request.path.messageID === phase
+      ? new Promise(resolve => {release = resolve;}) : nativeLookup(request);
+    const before = terminals().length;
+    const pending = idle(); await until(() => release);
+    // CLI 1.18 emits session metadata after idle while exact API reads remain
+    // in flight. It changes no message or execution status.
+    await emit("session.updated", {sessionID: sid, info: {id: sid, time: {updated: 5}}});
+    release(await nativeLookup({path: {messageID: phase}})); await pending;
+    assert.equal(terminals().length, before + 1, "Session metadata must not erase idle completion");
+    assert.equal(arg(terminals().at(-1), "--compaction-continuation-of"), "human-" + phase);
+    assert.equal(arg(terminals().at(-1), "--parent-message-id"), "synthetic");
+  }
+} else if (scenario === "real_activity_after_idle") {
+  for (const activity of ["busy", "retry", "new-human", "new-part"]) {
+    await witness("human-" + activity); await delta("answer");
+    let release;
+    lookup = request => request.path.messageID === "answer"
+      ? new Promise(resolve => {release = resolve;}) : nativeLookup(request);
+    const pending = idle(); await until(() => release);
+    if (activity === "new-human") await user("replacement-human");
+    else if (activity === "new-part") await delta("new-answer");
+    else await emit("session.status", {sessionID: sid, status: {type: activity}});
+    release(await nativeLookup({path: {messageID: "answer"}})); await pending;
+    assert.equal(terminals().length, 0, "Actual activity must invalidate in-flight idle attribution");
+  }
+} else if (scenario === "normal") {
   await user();
   await emit("message.updated", {info: {id: "u1", sessionID: sid, role: "user"}});
   await emit("message.updated", {info: info()});
@@ -460,6 +489,12 @@ class PluginMessageFallbackTests(unittest.TestCase):
                 env={"PATH": "/opt/homebrew/bin:/usr/bin:/bin"}, cwd=directory,
                 capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_post_idle_session_metadata_preserves_exact_continuation_lookups(self):
+        self.run_scenario("session_metadata_after_idle")
+
+    def test_actual_activity_still_invalidates_exact_idle_lookups(self):
+        self.run_scenario("real_activity_after_idle")
 
     def test_regular_events_need_no_exact_lookup_and_register_user_once(self):
         self.run_scenario("normal")

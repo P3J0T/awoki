@@ -320,7 +320,9 @@ A compaction summary stays distinct
 from an answer, with at most one additional exact parent read when needed.
 Only metadata and content-presence flags reach the bridge. Failed or stale reads
 leave completion unconfirmed, and overlapping events must not attach an old
-answer to a new user turn. This fallback does not infer a missing compaction
+answer to a new user turn. Routine session metadata updates do not cancel an
+in-flight idle lookup; execution-status changes and actual message, tool, or user
+activity still do. This fallback does not infer a missing compaction
 trigger or write a delayed trigger into the next compaction.
 
 Native autocontinue may give the final answer a synthetic user parent. The plugin
