@@ -331,9 +331,50 @@ if (scenario === "normal") {
   await emit("message.updated", {info: {id: "initial-human", sessionID: sid, role: "user"}});
   assert.equal(generations().length, 1);
   const count = calls.length;
+  lookup = async () => nativeUser("next-human", [part("text", {text: "PRIVATE_NEXT_HUMAN_CANARY"}, "next-human")]);
   await emit("message.updated", {info: {id: "next-human", sessionID: sid, role: "user"}});
   assert.equal(generations().length, 2);
-  assert.equal(calls.length, count, "Established ordinary event path remains fetch-free");
+  assert.equal(calls.length, count + 1, "An unseen event-only user is classified even in an established session");
+  await emit("message.updated", {info: {id: "next-human", sessionID: sid, role: "user"}});
+  assert.equal(calls.length, count + 1, "Known duplicate user IDs remain fetch-free");
+} else if (scenario === "early_compaction_marker") {
+  await user("human");
+  let release;
+  lookup = () => new Promise(resolve => {release = resolve;});
+  const first = emit("message.updated", {info: {id: "marker", sessionID: sid, role: "user"}});
+  await until(() => release || generations().length > 1);
+  assert.equal(generations().length, 1, "An early marker event must not register a second human");
+  const duplicate = emit("message.updated", {info: {id: "marker", sessionID: sid, role: "user"}});
+  // OpenCode 1.18 can publish marker user.info before its parts and before
+  // the compacting hook. The delayed exact read must not create a human turn.
+  await emit("message.part.updated", {part: part("compaction", {auto: true}, "marker")});
+  await compacting();
+  release(await nativeLookup({path: {messageID: "marker"}}));
+  await Promise.all([first, duplicate]);
+  assert.equal(calls.length, 1, "Duplicate initial classification is serialized and cached");
+  assert.equal(generations().length, 1, "The compaction marker cannot replace the registered human");
+  lookup = nativeLookup; await summaryText(); await autocontinue(); await compacted();
+  await delta("answer"); await idle();
+  assert.equal(terminals().length, 1);
+  assert.equal(arg(terminals()[0], "--compaction-continuation-of"), "human");
+  assert.equal(arg(terminals()[0], "--parent-message-id"), "synthetic");
+} else if (scenario === "early_unknown_and_new_chat") {
+  await user("human-1");
+  lookup = async () => nativeUser("marker", []);
+  await emit("message.updated", {info: {id: "marker", sessionID: sid, role: "user"}});
+  assert.equal(generations().length, 1, "Role-only event before parts must remain unclassified");
+  let release;
+  lookup = () => new Promise(resolve => {release = resolve;});
+  const pending = emit("message.updated", {info: {id: "late-event-human", sessionID: sid, role: "user"}});
+  await until(() => release);
+  await user("human-2");
+  release(nativeUser("late-event-human", [part("text", {text: "PRIVATE_OLD_HUMAN_CANARY"}, "late-event-human")]));
+  await pending;
+  assert.deepEqual(generations().map(row => arg(row, "--message-id")), ["human-1", "human-2"]);
+  lookup = async () => exact("answer-2", "human-2");
+  await delta("answer-2"); await idle();
+  assert.equal(terminals().length, 1);
+  assert.equal(arg(terminals()[0], "--parent-message-id"), "human-2");
 } else if (scenario === "two_plugin_instances") {
   await witness("human");
   const second = await AwokiContinuity({directory: "/owned/project", client});
@@ -458,6 +499,12 @@ class PluginMessageFallbackTests(unittest.TestCase):
 
     def test_fresh_instance_classifies_initial_event_only_user(self):
         self.run_scenario("fresh_instance_initial_user")
+
+    def test_marker_event_before_parts_and_compacting_preserves_original_human(self):
+        self.run_scenario("early_compaction_marker")
+
+    def test_unknown_early_event_and_new_chat_cannot_register_old_human(self):
+        self.run_scenario("early_unknown_and_new_chat")
 
     def test_second_plugin_instance_cannot_register_native_synthetic_user(self):
         self.run_scenario("two_plugin_instances")

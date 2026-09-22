@@ -359,10 +359,9 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
 
   const registerEventUser = async (sid: string, info: any) => {
     if (seenUsersBySession.get(sid)?.has(info?.id)) return
-    if (latestUserBySession.has(sid) && !compactions.has(sid) && !pendingUserChecks.has(sid)) return registerUser(sid, info, true)
-    // A fresh/recreated instance can first see a native synthetic user. Its
-    // role alone is insufficient. Established ordinary users stay fetch-free;
-    // initial and compaction-time classifications are serialized barriers.
+    // Native marker users can arrive before the compacting hook, even in an
+    // established session. Classify each unseen event-only user by exact parts;
+    // real chat hooks and already-classified duplicate IDs remain fetch-free.
     if (info?.sessionID !== sid || info.role !== "user" || typeof info.id !== "string" || !info.id) {
       compactions.delete(sid)
       return

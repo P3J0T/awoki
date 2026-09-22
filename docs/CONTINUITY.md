@@ -310,10 +310,12 @@ Hosts that omit durable message-update events are also supported through the
 actual user-message hook and observed assistant message IDs. At idle, when normal
 event metadata is incomplete, the plugin can read that exact message through the
 native SDK; it never lists the conversation. Session and parent identities must
-match before a terminal answer is recorded. A fresh plugin instance also checks
-the exact parts of its first event-only user before registration, so native
-synthetic users cannot become human turns after instance recreation. Direct
-user-message hooks and established ordinary event users remain fetch-free.
+match before a terminal answer is recorded. Each previously unseen event-only
+user is classified by its exact parts before registration: native compaction
+markers can arrive before the compacting hook, and synthetic users can be the
+first event after instance recreation. Missing or incomplete parts leave the
+identity unconfirmed. Direct user-message hooks and already-classified duplicate
+user IDs remain fetch-free.
 A compaction summary stays distinct
 from an answer, with at most one additional exact parent read when needed.
 Only metadata and content-presence flags reach the bridge. Failed or stale reads
