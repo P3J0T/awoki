@@ -42,12 +42,19 @@ instead of selecting a checkout arbitrarily.
 
 ### Investigating indexing constraint failures
 
-The current extraction profile (`awoki-symbol-extraction-v5`) identifies
+The current extraction profile (`awoki-symbol-extraction-v6`) identifies
 Tree-sitter declarations by exact byte span and node type as well as name/content.
 Distinct declarations on the same line therefore no longer share symbol/chunk
 IDs just because their names and bodies match. Storage reserves a write
 transaction before looking up a file to replace/delete and verifies that
 foreign-key enforcement is enabled on each connection.
+
+Reference identities also include the complete syntax occurrence span, so nested
+calls sharing a callee anchor remain distinct, including in the Python AST
+fallback. Tree-sitter resolves the callee name and location before shortening its
+display hint; long Go call chains therefore retain their actual final methods.
+The storage conflict check remains strict: different reference payloads with the
+same ID still reject indexing rather than silently dropping an occurrence.
 
 After deploying this change, explicitly refresh the structural index: prior
 parser-profile snapshots are stale and their files will be reparsed. The schema

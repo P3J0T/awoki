@@ -109,9 +109,9 @@ class CodeIndexIntegrityTests(unittest.TestCase):
             with self.assertRaises(sqlite3.ProgrammingError):
                 connection.execute("SELECT 1")
 
-    def test_current_extraction_profile_invalidates_v4_and_reparses(self):
+    def test_current_extraction_profile_invalidates_v5_and_reparses(self):
         profile = engine.parser_runtime_profile()
-        self.assertEqual(profile["extraction_profile"], "awoki-symbol-extraction-v5")
+        self.assertEqual(profile["extraction_profile"], "awoki-symbol-extraction-v6")
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             paths = HarnessPaths(root=root, global_root=root / "global")
@@ -119,7 +119,7 @@ class CodeIndexIntegrityTests(unittest.TestCase):
             project = project_workspace.paths_for(root, "demo").project_dir
             (project / "repo" / "value.py").write_text("def value():\n    return 1\n")
             with mock.patch.object(engine, "parser_runtime_profile", return_value={
-                **profile, "extraction_profile": "awoki-symbol-extraction-v4",
+                **profile, "extraction_profile": "awoki-symbol-extraction-v5",
             }):
                 first = engine.index_project_code(paths, "demo", include_qdrant=False)
             self.assertEqual(first["status"], "indexed", first)

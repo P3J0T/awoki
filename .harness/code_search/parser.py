@@ -413,9 +413,12 @@ def _call_target(data: bytes, node: Any) -> tuple[str, str, Any]:
         children = list(_named_children(node))
         candidate = children[0] if children else node
     text = _node_text(data, candidate).strip()
-    normalized = re.sub(r"\s+", "", text)[:500]
+    # Locate the callee before bounding the display hint. A long receiver chain
+    # can otherwise hide the final method and make later calls reuse an earlier
+    # call's target and anchor.
+    normalized = re.sub(r"\s+", "", text)
     target = _identifier_from_text(normalized)
-    return target, normalized, _call_anchor_node(data, candidate, target)
+    return target, normalized[:500], _call_anchor_node(data, candidate, target)
 
 
 def _module_hint(value: str) -> str:
@@ -680,8 +683,12 @@ def _tree_sitter_parse(path: str, data: bytes, spec: LanguageSpec, embedding_pro
     ) -> None:
         source_symbol = _containing_symbol(symbol_nodes, node)
         occurrence = anchor_node if anchor_node is not None else node
+        # A callee anchor is a useful citation, but nested expressions can share
+        # it. Bind identity to the complete syntax occurrence as well, including
+        # content beyond the bounded hint/source text.
         reference_id = _sha256(
             f"{path}|{source_symbol.symbol_id if source_symbol else ''}|{kind}|{target}|{_point_line(occurrence)}|{_point_column(occurrence)}|{hint}"
+            f"|{node.type}|{node.start_byte}|{node.end_byte}"
         )
         references.append(CodeReference(
             reference_id=reference_id,
@@ -957,9 +964,16 @@ def _python_ast_parse(path: str, data: bytes, embedding_profile_hash: str, reaso
         owner = containing(node)
         line = int(getattr(node, "lineno", 1))
         column = int(getattr(node, "col_offset", 0))
+        end_line = int(getattr(node, "end_lineno", None) or line)
+        end_column = getattr(node, "end_col_offset", None)
+        if end_column is None:
+            end_column = column
         observed = source_text or ast.get_source_segment(text, node) or hint
         references.append(CodeReference(
-            reference_id=_sha256(f"{path}|{owner.symbol_id if owner else ''}|{kind}|{target}|{line}|{column}|{hint}"),
+            reference_id=_sha256(
+                f"{path}|{owner.symbol_id if owner else ''}|{kind}|{target}|{line}|{column}|{hint}"
+                f"|{type(node).__name__}|{end_line}|{end_column}"
+            ),
             source_symbol_id=owner.symbol_id if owner else None,
             reference_kind=kind,
             target_name=target,
