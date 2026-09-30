@@ -903,7 +903,7 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
       }
       if (pendingUserChecks.has(sid)) return
       const priorRead = recoveryReads.get(sid)
-      if (priorRead?.summaryID === summary.id && priorRead.pending) return
+      if (priorRead && priorRead.summaryID === summary.id && priorRead.pending) return
       const epoch = recoveryEpochs.get(sid) ?? {}
       recoveryEpochs.set(sid, epoch)
       const userEpoch = eventUserEpochs.get(sid)
@@ -918,11 +918,11 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
         row?.info?.role === "assistant" && Boolean(row.info.error),
         Array.isArray(row?.parts) ? row.parts.map(part => [part?.id, part?.type, part?.sessionID, part?.messageID]) : null]))
       const originalIdentity = identity()
-      const read: RecoveryRead = priorRead?.summaryID === summary.id ? priorRead : {summaryID: summary.id, pending: true}
+      const read: RecoveryRead = priorRead && priorRead.summaryID === summary.id ? priorRead : {summaryID: summary.id, pending: true}
       recoveryReads.set(sid, read)
       // A raced read is not retried in a tool loop: the next eligible input gets
       // explicit unknown state. One bridge request per summary/plugin lifetime.
-      const result = priorRead?.summaryID === summary.id ? {} : await runBridge(["recovery-context", "--session-id", sid])
+      const result = priorRead && priorRead.summaryID === summary.id ? {} : await runBridge(["recovery-context", "--session-id", sid])
       read.pending = false
       if (recoveryReads.get(sid) !== read || recoveryEpochs.get(sid) !== epoch
           || eventUserEpochs.get(sid) !== userEpoch || latestUserBySession.get(sid) !== userID

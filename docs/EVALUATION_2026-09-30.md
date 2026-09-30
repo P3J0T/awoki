@@ -6,16 +6,20 @@ to save important instructions, read recovery references or preserve uncertainty
 
 ## Implementation checks
 
-The final implementation snapshot passed **886 tests, zero failures, errors or
+The implementation snapshot passed **886 tests, zero failures, errors or
 skips**, using Python 3.12.14 and the cached Linux runtime. Supporting checks
 passed for source policy, dependencies, parser behavior and retrieval contracts.
 The continuity plugin passed type and runtime checks against OpenCode SDK/plugin
 versions 1.18.30 and 1.14.33. These checks establish tested implementation behavior,
 not the correctness of model-authored findings.
 
-The implementation snapshot was compared by hash across 250 source files. Release
-metadata and this evaluation document were added afterward; the implementation
-was unchanged. Release validation and GitHub CI are separate checks.
+The initial validated snapshot was compared by hash across 250 source files.
+Release metadata and this evaluation document were added afterward. The first
+release CI run also exposed a portable TypeScript smoke-check incompatibility:
+without SDK types, optional-chain equality did not prove that cached recovery
+state existed. Explicit presence guards replace those checks without changing the
+intended recovery policy. Release validation and GitHub CI are separate checks;
+the live model results below predate this compiler-compatibility correction.
 
 ## Live setup
 
