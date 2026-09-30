@@ -294,6 +294,7 @@ def _upgrade_meta(meta: dict[str, Any], project_id: str) -> dict[str, Any]:
 
 def ensure_project_layout(root: Path, name: str) -> ProjectPaths:
     pp = paths_for(root, name)
+    existing_project = pp.project_json.exists()
     dirs = [
         pp.project_dir,
         pp.notes_dir,
@@ -319,6 +320,10 @@ def ensure_project_layout(root: Path, name: str) -> ProjectPaths:
         directory.mkdir(parents=True, exist_ok=True)
         _write_text_if_missing(directory / "README.md", f"# {pp.project_id} / {directory.relative_to(pp.project_dir)}\n\nAwoki project workspace directory.\n")
     for filename in ["continuity.jsonl", "facts.jsonl", "findings.jsonl", "hypotheses.jsonl", "decisions.jsonl", "events.jsonl", "pending.jsonl"]:
+        # A deleted canonical journal is unknown state, not a newly empty goal.
+        # Normal capture can still explicitly create it with a new saved note.
+        if filename == "continuity.jsonl" and existing_project and not (pp.memory_dir / filename).exists():
+            continue
         _touch(pp.memory_dir / filename)
     _touch(pp.index_dir / "safe_artifacts.jsonl")
     _write_text_if_missing(pp.notes_dir / "thoughts.md", f"# Thoughts: {pp.project_id}\n\n")
@@ -926,8 +931,11 @@ def project_capture(
     return saved
 
 
-def continuity_records(pp: ProjectPaths, include_legacy: bool = True) -> list[dict[str, Any]]:
-    return continuity.active_records(continuity.load_records(pp.memory_dir, pp.project_id, include_legacy=include_legacy))
+def continuity_records(pp: ProjectPaths, include_legacy: bool = True, *,
+                       canonical_records: Iterable[Mapping[str, Any]] | None = None) -> list[dict[str, Any]]:
+    return continuity.active_records(continuity.load_records(
+        pp.memory_dir, pp.project_id, include_legacy=include_legacy, canonical_records=canonical_records,
+    ))
 
 
 
@@ -1379,21 +1387,25 @@ def _uncertainties(records: list[dict[str, Any]], limit: int = 10) -> list[str]:
 def _continuations(records: list[dict[str, Any]], pp: ProjectPaths, limit: int = 8) -> list[str]:
     """Return optional continuation ideas with explicit user direction first.
 
-    Pending facets and inferred next steps are useful context, but a later
-    direction record represents the user's current instruction and must take
-    precedence over every older suggestion.
+    Pending facets and inferred next steps are useful context. A single saved
+    direction takes precedence; competing or unavailable direction needs
+    reconciliation rather than choosing an identity merely by recency.
     """
     out: list[str] = []
     closed_states = {"done", "closed", "resolved", "superseded"}
 
-    for record in reversed(records):
-        if record.get("kind") != "direction" or str(record.get("state") or "").lower() in closed_states:
-            continue
-        for value in (record.get("summary"), record.get("likely_continuation")):
-            text = str(value or "").strip()
-            if text and text not in out:
-                out.append(text)
-        if out:
+    goal = continuity.load_goal_projection(pp.memory_dir, pp.project_id)
+    if goal["status"] in {"ambiguous", "unknown"}:
+        out.append("Reconcile saved direction with the current user request before resuming earlier work.")
+    elif goal["status"] == "saved":
+        selected_id = goal["directions"][0]["record_id"]
+        for record in records:
+            if record.get("id") != selected_id:
+                continue
+            for value in (record.get("summary"), record.get("likely_continuation")):
+                text = str(value or "").strip()
+                if text and text not in out:
+                    out.append(text)
             break
 
     for item in pending_items(pp):
@@ -1436,6 +1448,13 @@ def _bounded_markdown(text: str, max_chars: int) -> str:
     return normalized[:boundary].rstrip() + marker
 
 
+def _goal_recovery_section(pp: ProjectPaths) -> list[str]:
+    projection = continuity.load_goal_projection(pp.memory_dir, pp.project_id)
+    if projection["status"] == "none" and not projection.get("checkpoints"):
+        return []
+    return _section("Saved direction and checkpoint details", continuity.goal_projection_lines(projection))
+
+
 def _render_situation(pp: ProjectPaths, meta: Mapping[str, Any], records: list[dict[str, Any]]) -> str:
     recent = continuity.meaningful_records(records)[-8:]
     knowledge = _knowledge_records(records, 8)
@@ -1451,6 +1470,7 @@ def _render_situation(pp: ProjectPaths, meta: Mapping[str, Any], records: list[d
         "",
         f"_Generated continuity snapshot · workspace generation {generation}_",
         "",
+        *_goal_recovery_section(pp),
         *_section("Project at a glance", [_project_narrative(pp, meta, records)]),
         *_section("Recent meaningful changes", [continuity.record_line(r) for r in recent]),
         *_section("Important knowledge", [continuity.record_line(r) for r in knowledge]),
@@ -1496,6 +1516,7 @@ def _render_handoff(
         "",
         f"_Generated resume document · workspace generation {generation}_",
         "",
+        *_goal_recovery_section(pp),
         *_section("Project identity", [
             f"- project_id: {pp.project_id}",
             f"- status: {meta.get('status', 'active')}",
@@ -1731,6 +1752,25 @@ def current_project_id(root: Path, session_id: str | None = None) -> str | None:
     return str(data["project_id"]) if data else None
 
 
+def session_attachment_status(root: Path, session_id: str) -> dict[str, str]:
+    """Recovery must distinguish a genuinely unattached session from lost scope."""
+    try:
+        data = json.loads(session_state_path(root, session_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"status": "unattached", "project_id": ""}
+    except (OSError, ValueError):
+        return {"status": "unknown", "project_id": ""}
+    if not isinstance(data, dict) or data.get("session_id") != session_id:
+        return {"status": "unknown", "project_id": ""}
+    if data.get("status") in {"paused", "unattached"}:
+        return {"status": "unattached", "project_id": ""}
+    project_id = data.get("project_id")
+    if (data.get("status") != "active" or not isinstance(project_id, str)
+            or not project_id or not project_exists(root, project_id)):
+        return {"status": "unknown", "project_id": ""}
+    return {"status": "attached", "project_id": project_id}
+
+
 def detach_session_project(root: Path, name: str = "", session_id: str | None = None) -> dict[str, Any]:
     sid = session_id or SESSION_ID
     state_path = session_state_path(root, sid)
@@ -1930,6 +1970,7 @@ def _resume_pack(pp: ProjectPaths) -> dict[str, Any]:
     freshness = _index_freshness(pp, meta)
     return {
         "project_id": pp.project_id,
+        "goal_recovery": continuity.load_goal_projection(pp.memory_dir, pp.project_id),
         "narrative": _project_narrative(pp, meta, records),
         "situation": pp.situation.read_text(encoding="utf-8", errors="replace")[:16_000],
         "handoff": pp.handoff.read_text(encoding="utf-8", errors="replace")[:32_000],

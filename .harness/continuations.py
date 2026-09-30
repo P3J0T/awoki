@@ -20,9 +20,10 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
+import continuity
 import project_workspace
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MIN_WAIT_SECONDS = 2
 MAX_WAIT_SECONDS = 60 * 60
 MAX_LIFETIME_SECONDS = 48 * 60 * 60
@@ -136,6 +137,13 @@ def _normalize_project(root: Path, session_id: str, project_id: str) -> tuple[st
     return current, None
 
 
+def _direction_fingerprint(root: Path, project_id: str) -> str:
+    """Bind automatic continuation to saved direction without copying its content."""
+    pp = project_workspace.paths_for(root, project_id)
+    result = continuity.direction_fingerprint(pp.memory_dir, pp.project_id)
+    return str(result.get("fingerprint") or "") if result.get("status") == "known" else ""
+
+
 def schedule(
     root: Path,
     session_id: str,
@@ -179,6 +187,9 @@ def schedule(
     path = project_workspace.session_state_path(root, session_id)
     with _lock(path):
         _, state = _state(root, session_id)
+        direction_fingerprint = _direction_fingerprint(root, explicit_project)
+        if not direction_fingerprint:
+            return {"status": "rejected", "reason": "direction_state_unavailable", "session_id": session_id}
         prior = state.get("continuation") if isinstance(state.get("continuation"), dict) else {}
         same_chain = (
             str(prior.get("workflow") or "") == workflow_clean
@@ -206,6 +217,9 @@ def schedule(
             "scope_kind": "managed_project",
             "project_id": explicit_project,
             "origin_project_id": origin_project,
+            # An opaque fingerprint also covers private directions; neither their
+            # text nor their IDs belong in an automatic continuation prompt.
+            "direction_fingerprint": direction_fingerprint,
             "repo": _clean_id(repo, max_len=160),
             "source_id": _clean_id(source_id, max_len=160),
             "wait_tool": wait_tool_clean,
@@ -318,6 +332,10 @@ def poll_due(root: Path, session_id: str) -> dict[str, Any]:
             return {"status": "none", "session_id": session_id}
         if int(current.get("generation") or 0) != generation:
             return {"status": "superseded", "session_id": session_id, "continuation": _public(current)}
+        if str(current.get("status") or "") != "waiting":
+            # The job read ran outside this lock. A cancellation/finalization (or
+            # another poll) may have completed meanwhile; never resurrect it.
+            return {"status": str(current.get("status") or "unknown"), "session_id": session_id, "continuation": _public(current)}
         job = observed.get("job") if isinstance(observed.get("job"), dict) else {}
         job_status = str(job.get("status") or observed.get("status") or "unknown")
         progress = observed.get("progress") if isinstance(observed.get("progress"), dict) else {}
@@ -376,7 +394,10 @@ def claim_due(root: Path, session_id: str) -> dict[str, Any]:
             return {"status": state_name, "session_id": session_id, "continuation": _public(record)}
         current_project = str(project_workspace.current_project_id(root, session_id=session_id) or "")
         expected_project = str(record.get("project_id") or "")
-        if expected_project and current_project and current_project != expected_project:
+        if expected_project and (
+            (current_project and current_project != expected_project)
+            or (not current_project and record.get("origin_project_id"))
+        ):
             return {
                 "status": "scope_conflict",
                 "session_id": session_id,
@@ -425,6 +446,25 @@ def claim_due(root: Path, session_id: str) -> dict[str, Any]:
             state["continuation"] = record
             _atomic_write_json(path, state)
             return {"status": "blocked", "session_id": session_id, "continuation": _public(record)}
+        bound_direction = str(record.get("direction_fingerprint") or "")
+        current_direction = _direction_fingerprint(root, expected_project) if bound_direction else ""
+        direction_reason = (
+            "direction_binding_missing" if not bound_direction else
+            "direction_state_unavailable" if not current_direction else
+            "direction_changed" if current_direction != bound_direction else ""
+        )
+        if direction_reason:
+            # Unknown is not the same as no saved goal. Hold this automatic
+            # action until the user/model reconciles and explicitly reschedules.
+            # No user-turn or TODO counter is consulted: a side question alone
+            # does not invalidate an otherwise unchanged saved direction.
+            record["status"] = "blocked"
+            record["blocked_reason"] = direction_reason
+            record["lease_until"] = ""
+            record["updated_at"] = _now()
+            state["continuation"] = record
+            _atomic_write_json(path, state)
+            return {"status": "blocked", "session_id": session_id, "continuation": _public(record)}
         record["status"] = "claimed"
         record["attempts"] = attempts + 1
         record["claimed_at"] = _now()
@@ -444,6 +484,8 @@ def release(root: Path, session_id: str, *, generation: int, retry_seconds: int 
             return {"status": "none", "session_id": session_id}
         if int(record.get("generation") or 0) != int(generation):
             return {"status": "superseded", "session_id": session_id, "continuation": _public(record)}
+        if str(record.get("status") or "") != "claimed":
+            return {"status": str(record.get("status") or "unknown"), "session_id": session_id, "continuation": _public(record)}
         seconds = max(MIN_WAIT_SECONDS, min(300, int(retry_seconds or 60)))
         record["status"] = "ready"
         record["lease_until"] = ""

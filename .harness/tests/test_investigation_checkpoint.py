@@ -78,6 +78,35 @@ class InvestigationCheckpointTests(unittest.TestCase):
         self.assertEqual(restored['supersedes'], [lead['id']])
         self.assertIn('Rejected lead:', self.pp.handoff.read_text())
 
+    def test_explicit_checkpoint_advice_does_not_create_a_goal_or_reject_exploration(self):
+        result = self.save('Callback boundary remains open', kind='reflection',
+                           tags=['investigation-checkpoint'])
+        self.assertEqual(result['status'], 'captured')
+        advice = ' '.join(result['capture_advice'])
+        self.assertIn('likely_continuation', advice)
+        self.assertIn('Exploration can have no goal', advice)
+        self.assertEqual(project_workspace.continuity.load_goal_projection(self.pp.memory_dir, 'demo')['status'], 'none')
+        record = self.get([result['id']])['records'][0]
+        self.assertEqual(record['likely_continuation'], '')
+        self.assertNotIn('capture_advice', record)
+
+    def test_checkpoint_advice_is_bounded_to_missing_saved_fields(self):
+        self.save('Inspect callback ordering without editing the source', kind='direction')
+        result = self.save('Callback checkpoint with next action', kind='reflection',
+                           tags=['investigation-checkpoint'], likely_continuation='Inspect callback implementation.')
+        self.assertFalse(result['capture_advice'])
+        for index, fields in enumerate(({}, {'state': 'closed', 'tags': ['investigation-checkpoint']},
+                                       {'state': 'checkpoint', 'index_policy': 'no_rag'})):
+            with self.subTest(fields=fields):
+                result = self.save(f'Ordinary or retired note {index}', **fields)
+                self.assertNotIn('next-check', ' '.join(result.get('capture_advice', [])))
+
+    def test_checkpoint_advice_survives_batch_result_projection(self):
+        result = self.save('', items=[{'summary': 'Initial source inspection', 'kind': 'reflection',
+                                      'tags': ['investigation-checkpoint']}])
+        self.assertEqual(result['written'], 1)
+        self.assertTrue(any('likely_continuation' in advice for advice in result['items'][0]['capture_advice']))
+
     def test_new_direction_precedes_old_checkpoint_suggestion(self):
         checkpoint = self.save('Checkpoint: callback boundary', kind='reflection',
             tags=['investigation-checkpoint', 'callback'],

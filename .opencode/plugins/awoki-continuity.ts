@@ -178,6 +178,7 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     toolExecutionsCompleted: number;
     parentMessageID?: string; isSummary?: boolean;
     infoSeen?: boolean; partsSeen?: boolean; lookupAttempted?: boolean; terminalRecorded?: boolean;
+    terminalRecording?: boolean; terminalAttempts?: number;
     summaryParentVerified?: boolean; textCompleteSeen?: boolean;
     compactionContinuation?: CompactionWitness;
     activityVersion: number;
@@ -196,6 +197,15 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
   const seenUsersBySession = new Map<string, Set<string>>()
   const idleLookups = new Map<string, Promise<void>>()
   const userRegistrations = new Map<string, Promise<Record<string, any>>>()
+  type UserPersistence = { messageID: string; attempts: number; durable: boolean; inFlight?: Promise<Record<string, any>> }
+  const userPersistence = new Map<string, UserPersistence>()
+  const bridgeSucceeded = Symbol("bridgeSucceeded")
+  const recoveryReminders = new Map<string, string>()
+  const recoveryEpochs = new Map<string, object>()
+  type RecoveryRead = { summaryID: string; pending: boolean }
+  const recoveryReads = new Map<string, RecoveryRead>()
+  const unknownRecovery = "Awoki recovery is unknown: scope, work and acceptance state could not be verified. Do not infer no goal, completion or unrestricted actions. Recover authoritative session/acceptance state before acting; follow the newest user request."
+
   const nativeToolNames = new Set(["bash", "read", "write", "edit", "patch", "glob", "grep", "list", "task", "todowrite"])
   const acceptanceSessions = new Set<string>()
   const acceptanceObservableOrchestrationTools = new Set([
@@ -206,14 +216,21 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
   ])
 
   const log = async (level: "debug" | "info" | "warn" | "error", message: string, extra: Record<string, unknown> = {}) => {
+    let timeout: ReturnType<typeof setTimeout> | undefined
     try {
-      await client.app.log({ body: { service: "awoki-continuity", level, message, extra } })
+      await Promise.race([
+        client.app.log({ body: { service: "awoki-continuity", level, message, extra } }),
+        new Promise<void>(resolve => { timeout = setTimeout(resolve, 2_000) }),
+      ])
     } catch {
       // Continuity must never make OpenCode fail because logging is unavailable.
+    } finally {
+      if (timeout) clearTimeout(timeout)
     }
   }
 
-  const runBridge = async (args: string[], payload?: Record<string, unknown>): Promise<Record<string, any>> => {
+  const runBridge = async (args: string[], payload?: Record<string, unknown>): Promise<Record<string, any> & {[bridgeSucceeded]?: boolean}> => {
+    let timeout: ReturnType<typeof setTimeout> | undefined
     try {
       const proc = Bun.spawn(["python3", bridge, ...args], {
         cwd: directory,
@@ -221,19 +238,33 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
         stdout: "pipe",
         stderr: "pipe",
       })
-      const [stdout, stderr, exitCode] = await Promise.all([
+      const completed = Promise.all([
         new Response(proc.stdout).text(),
         new Response(proc.stderr).text(),
         proc.exited,
+      ])
+      const [stdout, stderr, exitCode] = await Promise.race([
+        completed,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            try { proc.kill("SIGKILL") } catch { /* The process may have already exited. */ }
+            reject(new Error("Awoki event bridge timed out after 15 seconds"))
+          }, 15_000)
+        }),
       ])
       if (exitCode !== 0) {
         await log("warn", "Awoki event bridge failed", { exitCode, stderr: stderr.slice(0, 2_000) })
         return {}
       }
-      return stdout.trim() ? JSON.parse(stdout) : {}
+      const result = stdout.trim() ? JSON.parse(stdout) : {}
+      if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Invalid bridge response")
+      // Local transport acknowledgment, never supplied by the bridge payload.
+      return Object.assign(result, {[bridgeSucceeded]: true})
     } catch (error) {
       await log("warn", "Awoki event bridge raised an error", { error: String(error) })
       return {}
+    } finally {
+      if (timeout) clearTimeout(timeout)
     }
   }
 
@@ -321,12 +352,38 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     seenUsersBySession.set(sid, seen)
   }
 
+  const persistObservedUser = async (sid: string, mid: string) => {
+    const state = userPersistence.get(sid)
+    if (!state || state.messageID !== mid || latestUserBySession.get(sid) !== mid) return {}
+    if (state.inFlight) return state.inFlight
+    if (state.durable || state.attempts >= 2) return {}
+    const priorRegistration = userRegistrations.get(sid)
+    const registration = (async () => {
+      // Preserve observed human ordering without replaying a stale failed write
+      // over a newer user. A duplicate event/idle permits one retry, never a loop.
+      await priorRegistration
+      if (userPersistence.get(sid) !== state || latestUserBySession.get(sid) !== mid) return {}
+      state.attempts++
+      const result = await runBridge(["user-turn", "--session-id", sid, "--message-id", mid])
+      if (result[bridgeSucceeded] && ["marked", "unchanged"].includes(result.status)
+          && ["user_turn_recorded", "recovery_attempt_recorded", "duplicate"].includes(result.agent_runtime?.status)
+          && result.agent_runtime?.current_turn?.user_message_id === mid) state.durable = true
+      return result
+    })()
+    state.inFlight = registration
+    userRegistrations.set(sid, registration)
+    try { return await registration } finally {
+      if (state.inFlight === registration) state.inFlight = undefined
+    }
+  }
+
   const registerUser = async (sid: string, info: any, fromEvent = false) => {
     const mid = info?.id
     if (!sid || info?.sessionID !== sid || info?.role !== "user" || typeof mid !== "string" || !mid) return
     const seen = seenUsersBySession.get(sid) ?? new Set<string>()
-    if (seen.has(mid)) return
+    if (seen.has(mid)) return persistObservedUser(sid, mid)
     compactions.delete(sid)
+    recoveryEpochs.set(sid, {})
     if (!fromEvent) {
       eventUserEpochs.set(sid, {})
       pendingUserChecks.delete(sid)
@@ -338,15 +395,8 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     if (prior) assistantTurns.delete(prior)
     latestAssistantBySession.delete(sid)
     latestUserBySession.set(sid, mid)
-    const priorRegistration = userRegistrations.get(sid)
-    const registration = (async () => {
-      // Hook/event handlers can overlap. Preserve observed user order in the
-      // durable bridge even when an earlier process completes slowly.
-      await priorRegistration
-      return runBridge(["user-turn", "--session-id", sid, "--message-id", mid])
-    })()
-    userRegistrations.set(sid, registration)
-    await registration
+    userPersistence.set(sid, {messageID: mid, attempts: 0, durable: false})
+    await persistObservedUser(sid, mid)
   }
 
   const syntheticContinuation = (data: any, sid: string, mid: string): boolean => Boolean(
@@ -358,7 +408,7 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
   )
 
   const registerEventUser = async (sid: string, info: any) => {
-    if (seenUsersBySession.get(sid)?.has(info?.id)) return
+    if (seenUsersBySession.get(sid)?.has(info?.id)) return persistObservedUser(sid, info.id)
     // Native marker users can arrive before the compacting hook, even in an
     // established session. Classify each unseen event-only user by exact parts;
     // real chat hooks and already-classified duplicate IDs remain fetch-free.
@@ -366,6 +416,9 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
       compactions.delete(sid)
       return
     }
+    // Even a quickly resolved unknown/native event can race a recovery read.
+    // Its classification must not leave that older read looking current.
+    recoveryEpochs.set(sid, {})
     const epoch = eventUserEpochs.get(sid) ?? {}
     eventUserEpochs.set(sid, epoch)
     const check = {}
@@ -533,6 +586,8 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
 
   const recordTerminalTurn = async (sid: string) => {
     if (!idleSessions.has(sid)) return
+    const observedUser = latestUserBySession.get(sid)
+    if (observedUser) await persistObservedUser(sid, observedUser)
     let registration: Promise<Record<string, any>> | undefined
     do {
       registration = userRegistrations.get(sid)
@@ -540,16 +595,19 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
       if (!idleSessions.has(sid)) return
     } while (registration !== userRegistrations.get(sid))
     const user = latestUserBySession.get(sid)
+    if (user && !userPersistence.get(sid)?.durable) return
     await recoverTerminalMetadata(sid)
     if (!idleSessions.has(sid) || pendingUserChecks.has(sid) || latestUserBySession.get(sid) !== user) return
     const mid = latestAssistantBySession.get(sid) || ""
     const state = mid ? assistantTurns.get(mid) : undefined
-    if (!state || state.terminalRecorded || !terminalMetadataReady(state) || state.sessionID !== sid) return
+    if (!state || state.terminalRecorded || state.terminalRecording || (state.terminalAttempts || 0) >= 2
+        || !terminalMetadataReady(state) || state.sessionID !== sid) return
     if (state.parentMessageID !== latestUserBySession.get(sid)
         && !(state.isSummary && state.summaryParentVerified)
         && !(state.compactionContinuation && compactions.get(sid) === state.compactionContinuation
           && state.compactionContinuation.userMessageID === user)) return
-    state.terminalRecorded = true
+    state.terminalRecording = true
+    state.terminalAttempts = (state.terminalAttempts || 0) + 1
     const args = [
       "agent-turn-terminal", "--session-id", sid, "--message-id", state.messageID,
       "--parent-message-id", state.parentMessageID || "",
@@ -569,11 +627,18 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
       args.push("--compaction-continuation-of", state.compactionContinuation.userMessageID,
         "--compaction-summary-message-id", state.compactionContinuation.summaryMessageID || "",
         "--compaction-marker-message-id", state.compactionContinuation.markerMessageID || "")
-      // One terminal receipt consumes this observed continuation, not a reusable
-      // license to attribute other synthetic users to the original human.
-      compactions.delete(sid)
     }
     const result = await runBridge(args)
+    state.terminalRecording = false
+    const receipt = state.isSummary ? result.last_compaction_turn : result.last_terminal_turn
+    if (!result[bridgeSucceeded] || !["recorded", "summary_recorded", "duplicate"].includes(result.status)
+        || receipt?.message_id !== state.messageID || receipt?.parent_message_id !== state.parentMessageID
+        || Boolean(receipt?.is_summary) !== Boolean(state.isSummary)) return
+    state.terminalRecorded = true
+    // Only an acknowledged terminal receipt consumes the witness. A failed
+    // write can retry once, without consuming a newer compaction's identity.
+    if (state.compactionContinuation && !state.isSummary
+        && compactions.get(sid) === state.compactionContinuation) compactions.delete(sid)
     if (result.runtime_state === "degraded") {
       await log("warn", "Awoki detected terminal assistant-turn anomaly", {
         sessionID: sid, messageID: state.messageID, finishReason: state.finish,
@@ -583,19 +648,28 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     }
   }
 
-  const eventTodos = (value: unknown): Array<Record<string, unknown>> => {
-    if (!value || typeof value !== "object") return []
+  const eventTodos = (value: unknown): {todos: Array<Record<string, unknown>>; todos_omitted: number} | undefined => {
+    if (!value || typeof value !== "object") return
     const direct = (value as any)?.properties?.todos ?? (value as any)?.todos
-    if (!Array.isArray(direct)) return []
-    return direct
-      .filter((row) => row && typeof row === "object")
+    // Missing/malformed payloads are unknown, not an intentional TODO clear.
+    if (!Array.isArray(direct) || direct.some(row => !row || typeof row !== "object" || Array.isArray(row)
+        || typeof row.content !== "string" || !row.content.trim()
+        || (row.id !== undefined && typeof row.id !== "string")
+        || !["pending", "in_progress", "completed", "cancelled"].includes(row.status)
+        || !["low", "medium", "high"].includes(row.priority))) return
+    const todos = direct
       .slice(0, 64)
-      .map((row: any) => ({
-        id: typeof row.id === "string" ? row.id.slice(0, 200) : "",
-        content: typeof row.content === "string" ? row.content.slice(0, 800) : "",
-        status: typeof row.status === "string" ? row.status.slice(0, 40) : "pending",
-        priority: typeof row.priority === "string" ? row.priority.slice(0, 40) : "medium",
-      }))
+      .map((row: any) => {
+        // The local bridge redacts this bounded original before extracting
+        // navigation references and storing an 800-character display projection.
+        // Do not extract IDs here: credential text can resemble a reference.
+        return {
+          id: typeof row.id === "string" ? row.id.slice(0, 200) : "",
+          content: row.content.slice(0, 8_192), status: row.status, priority: row.priority,
+          content_truncated: row.content.length > 8_192,
+        }
+      })
+    return {todos, todos_omitted: Math.min(1_000_000, Math.max(0, direct.length - todos.length))}
   }
 
   const normalizeTool = (tool: string): string => {
@@ -781,6 +855,95 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
   setTimeout(() => void restorePendingContinuations(), 50)
 
   return {
+    "experimental.chat.messages.transform": async (_input, output) => {
+      // A compaction prompt can be replaced by another plugin. Recover from the
+      // actual resumed transcript, without another system message or prompt RPC.
+      // This output is the transient model input, not a persisted chat update.
+      const messages = output.messages
+      if (!Array.isArray(messages) || !messages.length) return
+      const sid = messages.at(-1)?.info?.sessionID
+      if (typeof sid !== "string" || !sid || messages.some(row => !row?.info || row.info.sessionID !== sid
+          || typeof row.info.id !== "string" || !row.info.id || !Array.isArray(row.parts)
+          || row.parts.some(part => !part || part.sessionID !== sid || part.messageID !== row.info.id))) return
+      let summaryIndex = -1
+      for (let index = messages.length - 1; index >= 0; index--) {
+        const info = messages[index].info
+        if (info.role === "assistant" && info.summary === true) {
+          if (info.error || !["stop", "end_turn"].includes(messageFinish({info}))
+              || !Number.isFinite(info.time?.completed)) return
+          summaryIndex = index
+          break
+        }
+      }
+      if (summaryIndex < 0) return
+      const summary = messages[summaryIndex].info
+      if (summary.role !== "assistant") return
+      if (recoveryReminders.get(sid) === summary.id) return
+      const following = messages.slice(summaryIndex + 1)
+      // A newer marker means this is input to another summarizer, not resumed
+      // investigation. Its tools are disabled, so do not inject a tool request.
+      if (following.some(row => row.parts.some(part => part.type === "compaction"))) return
+      const user = [...following].reverse().find(row => row.info.role === "user")
+      let targetIndex = user ? messages.indexOf(user) : -1
+      if (!user) {
+        // Native compaction can retain an assistant-only tail with no new user.
+        // Bind the fallback to the exact completed-summary/marker pair. Native
+        // summarization removes prior pairs from its own selected input.
+        const marker = messages.slice(0, summaryIndex).find(row => row.info.role === "user"
+          && row.info.id === summary.parentID && row.parts.length > 0
+          && row.parts.every(part => part.type === "compaction"))
+        if (!marker) return
+        targetIndex = summaryIndex
+      }
+      const target = messages[targetIndex]
+      const reminderID = `${summary.id}_awoki_recovery`
+      if (target.parts.some(part => part.id === reminderID)) {
+        recoveryReminders.set(sid, summary.id)
+        return
+      }
+      if (pendingUserChecks.has(sid)) return
+      const priorRead = recoveryReads.get(sid)
+      if (priorRead?.summaryID === summary.id && priorRead.pending) return
+      const epoch = recoveryEpochs.get(sid) ?? {}
+      recoveryEpochs.set(sid, epoch)
+      const userEpoch = eventUserEpochs.get(sid)
+      const userID = latestUserBySession.get(sid)
+      // Keep only structural identity, never copy transcript prose into the
+      // bridge. Recheck the outgoing input after the asynchronous local read.
+      const identity = () => JSON.stringify(messages.map(row => [row?.info?.sessionID,
+        row?.info?.id, row?.info?.role, row?.info?.role === "assistant" && row.info.summary,
+        row?.info?.role === "assistant" && row.info.parentID,
+        row?.info?.role === "assistant" && row.info.finish,
+        row?.info?.role === "assistant" && row.info.time?.completed,
+        row?.info?.role === "assistant" && Boolean(row.info.error),
+        Array.isArray(row?.parts) ? row.parts.map(part => [part?.id, part?.type, part?.sessionID, part?.messageID]) : null]))
+      const originalIdentity = identity()
+      const read: RecoveryRead = priorRead?.summaryID === summary.id ? priorRead : {summaryID: summary.id, pending: true}
+      recoveryReads.set(sid, read)
+      // A raced read is not retried in a tool loop: the next eligible input gets
+      // explicit unknown state. One bridge request per summary/plugin lifetime.
+      const result = priorRead?.summaryID === summary.id ? {} : await runBridge(["recovery-context", "--session-id", sid])
+      read.pending = false
+      if (recoveryReads.get(sid) !== read || recoveryEpochs.get(sid) !== epoch
+          || eventUserEpochs.get(sid) !== userEpoch || latestUserBySession.get(sid) !== userID
+          || pendingUserChecks.has(sid) || output.messages !== messages
+          || messages[targetIndex] !== target || identity() !== originalIdentity
+          || recoveryReminders.get(sid) === summary.id) return
+      const valid = result[bridgeSucceeded] && ["ok", "unknown"].includes(result.status)
+        && result.session_id === sid && typeof result.context === "string"
+        && result.context.trim().length > 0 && result.context.length <= 2500
+      const context = valid ? result.context : unknownRecovery
+      if (valid && typeof result.acceptance_run_id === "string" && result.acceptance_run_id.length > 0
+          && result.acceptance_run_id.length <= 200) acceptanceSessions.add(sid)
+      // Replace only the outgoing row; preserve its original body/parts objects
+      // for any other caller retaining them. No canonical message is updated.
+      messages[targetIndex] = {...target, parts: [...target.parts, {
+        id: reminderID, sessionID: sid, messageID: target.info.id,
+        type: "text", synthetic: true, text: context,
+      }]}
+      recoveryReminders.set(sid, summary.id)
+    },
+
     "chat.message": async (input, output) => {
       const parts = output.parts
       if (parts?.length && (parts.every((part: any) => part.type === "compaction")
@@ -810,6 +973,8 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
       if (sessionAwareTools.has(tool) && input.sessionID && !output.args.session_id) {
         output.args.session_id = input.sessionID
       }
+      if ((projectOpenTools.has(tool) || acceptanceObservableOrchestrationTools.has(tool)
+          || acceptanceControlTools.has(tool)) && input.sessionID) recoveryEpochs.set(input.sessionID, {})
       if (projectOpenTools.has(tool) && input.sessionID) {
         const target = typeof output.args.name === "string" ? output.args.name.trim() : ""
         if (target) {
@@ -844,7 +1009,10 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
         await syncContinuation(input.sessionID)
         return
       }
-      if (continuityMaintenanceTools.has(tool)) return
+      if (continuityMaintenanceTools.has(tool)) {
+        recoveryEpochs.set(input.sessionID, {})
+        return
+      }
       await runBridge([
         "activity", "--session-id", input.sessionID, "--event", "tool.execute.after",
         "--tool", String(input.tool || "unknown"),
@@ -852,13 +1020,22 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
     },
 
     event: async ({ event }) => {
-      const sid = sessionID(event)
+      // The default SDK also exposes deletion as properties.info.id. Limit this
+      // fallback to a session lifecycle event, never a generic message/part ID.
+      const sid = sessionID(event) || (event.type === "session.deleted" && typeof (event as any)?.properties?.info?.id === "string"
+        ? (event as any).properties.info.id : "")
       if (!sid) return
       if (event.type === "file.edited" || event.type === "file.watcher.updated") {
         idleSessions.delete(sid)
         await runBridge(["activity", "--session-id", sid, "--event", event.type, "--path", filePath(event)])
       } else if (event.type === "todo.updated") {
-        await runBridge(["todo-sync", "--session-id", sid], { todos: eventTodos(event) })
+        const todos = eventTodos(event)
+        if (todos === undefined) {
+          await log("warn", "Awoki ignored malformed TODO update", {sessionID: sid})
+          return
+        }
+        recoveryEpochs.set(sid, {})
+        await runBridge(["todo-sync", "--session-id", sid], todos)
       } else if (event.type === "message.updated") {
         idleSessions.delete(sid)
         const role = messageRole(event)
@@ -911,6 +1088,10 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
         latestUserBySession.delete(sid)
         seenUsersBySession.delete(sid)
         userRegistrations.delete(sid)
+        userPersistence.delete(sid)
+        recoveryReminders.delete(sid)
+        recoveryReads.delete(sid)
+        recoveryEpochs.delete(sid)
         compactions.delete(sid)
         pendingUserChecks.delete(sid)
         eventUserEpochs.delete(sid)
@@ -956,8 +1137,12 @@ export const AwokiContinuity: Plugin = async ({ client, directory }) => {
       if (user) compactions.set(sid, {userMessageID: user, compacted: false})
       else compactions.delete(sid)
       await runBridge(["checkpoint", "--session-id", sid, "--reason", "session.compacting", "--force"])
-      const result = await runBridge(["context", "--session-id", sid, "--max-chars", "24000"])
-      const context = typeof result.context === "string" ? result.context : ""
+      const prefix = "Awoki reference state for summarization only. Tools are unavailable here: summarize useful facts, exact IDs, constraints and unknowns; do not execute tools or emit tool-call markup. Recovery instructions below apply to the next investigation turn."
+      const suffix = "End of reference state. Return a prose summary only; perform recovery calls on the next investigation turn."
+      const budget = 24_000 - prefix.length - suffix.length - 4
+      const result = await runBridge(["context", "--session-id", sid, "--max-chars", String(budget)])
+      const context = typeof result.context === "string" && result.context
+        ? `${prefix}\n\n${result.context}\n\n${suffix}` : ""
       if (typeof result.acceptance_run_id === "string" && result.acceptance_run_id) acceptanceSessions.add(sid)
       if (context) output.context.push(context)
     },

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.2 — investigation continuity and reference identity (2026-09-30)
+
+- Derives bounded goal and checkpoint pointers from ordinary saved notes, linking project handoff and session recovery without introducing another goal database. Missing saved goals remain valid exploration; competing or unavailable state requires reconciliation.
+- Supplies a bounded, read-only recovery snapshot after native OpenCode compaction. Persistence acknowledgments, bounded retries and session/message identity checks protect against stale or misattributed updates.
+- Preserves safe note references and omission metadata in shortened TODOs, protects corrupt work state from overwrite, and binds detached continuations to the current saved direction. Changed or unavailable direction blocks stale automatic continuation; legacy queued resumes without that binding must be deliberately rescheduled.
+- Makes project search report unavailable canonical memory as unknown before retrieval or index refresh. Private, closed and superseded direction labels are excluded from current navigation; recorded unfinished task steps cannot silently become completed.
+- Fixes parser reference identity collisions between distinct occurrences across supported languages. Extraction profile advances from `awoki-symbol-extraction-v5` to `awoki-symbol-extraction-v6`; explicit structural refresh reparses older-profile files. SQLite schema 4 is unchanged.
+- Validation: the final implementation passed 886 tests with no skips, plus source, dependency, parser, retrieval and OpenCode SDK checks. Native Qwen tests exercised real Awoki tools, compaction, restart and handoff. They also exposed missing saved constraints/TODOs, skipped exact recall and unsupported conclusions; reliable unattended investigation continuity is not established. See [the evaluation report](docs/EVALUATION_2026-09-30.md).
+- Public package version is `0.2.2`; internal harness version is `10.24`. This release strengthens storage and recovery safeguards without certifying model interpretation.
+
 ## v0.2.1 — saved source references and native completion attribution (2026-09-22)
 
 - Returns copy-ready `continuity_sources` from source capture and rejects legacy verifier tokens in saved `sources`, evidence aliases and inherited `based_on` references before writing a note. Existing verifier tokens remain valid for verification; ordinary source paths and historical records retain their existing behavior.

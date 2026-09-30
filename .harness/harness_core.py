@@ -1342,6 +1342,7 @@ def _project_open_projection(
             "todo_generation": int(work.get("todo_generation") or 0),
             "todos_need_review": bool(work.get("todos_need_review")),
             "todos": list(work.get("todos") or [])[:12],
+            "todos_omitted": max(0, len(work.get("todos") or []) - 12) + int(work.get("todos_omitted") or 0),
             "references_need_review": bool(work.get("references_need_review")),
             "active_references": list(work.get("active_references") or [])[:8],
         }
@@ -1368,6 +1369,8 @@ def _project_open_projection(
         "attached_for_current_session": bool(result.get("attached_for_current_session")),
         "session": result.get("session") or {},
         "active_work": active_work,
+        "goal_recovery": result.get("goal_recovery") or continuity.load_goal_projection(
+            project_workspace.paths_for(paths.root, project_id).memory_dir, project_id),
         "continuity": continuation,
         "prior_material": _project_open_prior_material(paths, project_id),
         "detail_access": {
@@ -2190,6 +2193,20 @@ def project_capture(
         allow_sensitive_plaintext=allow_sensitive_plaintext,
     )
     advice = []
+    saved_state = str(state or "").lower()
+    explicit_checkpoint = (kind == "checkpoint" or saved_state == "checkpoint"
+                           or "investigation-checkpoint" in (tags or []))
+    closed_checkpoint = saved_state in {"done", "complete", "completed", "closed", "resolved", "retired", "superseded", "cancelled", "canceled"}
+    if explicit_checkpoint and not closed_checkpoint and effective_policy != "no_rag" and effective_sensitivity not in {"sensitive", "secret"}:
+        # Feedback about explicit saved fields, never an inferred goal or a gate.
+        # Ordinary notes and free exploration do not acquire mandatory tasks.
+        if not str(saved.get("likely_continuation") or "").strip():
+            advice.append("This checkpoint has no separate next-check field. If work remains, preserve its next check in likely_continuation; saving a finding does not complete the investigation.")
+        direction = continuity.load_goal_projection(pp.memory_dir, project_id)
+        if direction["status"] == "none":
+            advice.append('No direction note is saved. For an ongoing multi-step goal, save kind="direction" with the requested outcome, limits and completion conditions, then link its returned ID in native TODOs. Exploration can have no goal; do not invent one.')
+        elif direction["status"] in {"ambiguous", "unknown"}:
+            advice.append("Saved direction needs reconciliation with the current user request. Recover session_work_status before choosing an older goal; unavailable direction is not an empty or completed plan.")
     if len(str(saved.get("details") or "")) > 2000:
         advice.append("Long notes are saved intact but search shows previews. Prefer one observation per items entry; use project_search(record_ids=[id]) to recover full details.")
     if any(not str(source.get("id") or "").startswith("ev_") for source in saved.get("sources") or []):
@@ -2522,7 +2539,20 @@ def project_search(
     pp = project_workspace_path(paths, project_id=project_id, session_id=session_id or None)
     if pp is None:
         return {"status": "not_found", "project_id": project_id}
-    records = {str(row.get("id")): row for row in project_workspace.view_safe_records(project_workspace.continuity_records(pp))}
+    # Tolerant legacy recall must not turn an unreadable canonical journal into
+    # empty memory or refresh a derived index from incomplete source state.
+    try:
+        canonical_records = continuity._read_goal_records(pp.memory_dir, pp.project_id)
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return {
+            "status": "unknown", "project_id": project_id,
+            "reason": "canonical_state_unavailable", "memory_state": "unknown",
+            "retrieval": "not_attempted; canonical journal unavailable",
+            "recovery_advice": "Saved notes cannot be read reliably. This is not evidence that no notes or goal exist. Preserve current work and recover the journal before relying on memory; do not reconstruct authoritative notes from a stale summary.",
+        }
+    records = {str(row.get("id")): row for row in project_workspace.view_safe_records(
+        project_workspace.continuity_records(pp, canonical_records=canonical_records)
+    )}
     if record_ids is not None:
         if (not isinstance(record_ids, list) or not 1 <= len(record_ids) <= 3
                 or any(not isinstance(ref, str) or not ref.startswith("cont_") for ref in record_ids)
@@ -2544,7 +2574,7 @@ def project_search(
         if _project_vector_is_current(pp)
         else []
     )
-    project_fallback = _legacy_hits_to_rag(search_records(query, project_workspace.view_safe_records(project_workspace.continuity_records(pp)), limit=limit))
+    project_fallback = _legacy_hits_to_rag(search_records(query, records.values(), limit=limit))
     project_hits = rag_backend.merge_hits(
         *(memory_recall.canonical_hits(hits, records, project_id) for hits in (project_fts, project_vec, project_fallback)),
         limit=max(limit, 30),
@@ -3651,10 +3681,35 @@ def project_continuation_finalize(
 def session_work_status(
     *, session_id: str = "", paths: HarnessPaths | None = None
 ) -> dict[str, Any]:
-    """Return durable OpenCode TODO/work state for this session, including unattached/ad-hoc sessions."""
+    """Recover bounded operational state and safe canonical direction pointers; no model calls."""
     paths = paths or HarnessPaths.from_env()
     ensure_dirs(paths)
-    return work_ledger.status(paths.root, session_id)
+    work = work_ledger.status(paths.root, session_id)
+    if not session_id.strip():
+        return work
+    attachment = project_workspace.session_attachment_status(paths.root, session_id)
+    project_id = attachment["project_id"]
+    goal = continuity.load_goal_projection(
+        project_workspace.paths_for(paths.root, project_id).memory_dir, project_id
+    ) if project_id else {"status": "none", "project_id": "", "reason": "unattached_ad_hoc",
+                          "directions": [], "checkpoints": [], "next_calls": []}
+    if attachment["status"] == "unknown":
+        goal = {"status": "unknown", "project_id": "", "reason": "session_scope_unavailable",
+                "directions": [], "checkpoints": [], "next_calls": []}
+    previous_project = str(work.get("project_id") or "")
+    scope_matches = not previous_project or previous_project == project_id
+    return {
+        **work,
+        "current_project_id": project_id,
+        "scope_matches": scope_matches,
+        "goal_recovery": goal,
+        "recovery": {
+            "state_available": work.get("status") in {"ok", "none"} and goal.get("status") != "unknown",
+            "needs_reconciliation": bool(work.get("todos_need_review")) or not scope_matches
+                or work.get("status") == "unknown" or goal.get("status") in {"ambiguous", "unknown"},
+            "advice": "Reconcile the newest user direction and native TODOs. Exact-read relevant goal/checkpoint notes using next_calls; preserve corrections and unresolved work. No saved direction is valid exploration, not proof of completion. Unavailable state is unknown. Do not restore another project's work or invent a goal.",
+        },
+    }
 
 
 def _reference_project_id(
@@ -3981,6 +4036,10 @@ def project_task_checkpoint(
     if not project_id:
         return {"status": "rejected", "reason": "No project is attached."}
     clean_status = re.sub(r"[^a-z0-9_-]+", "-", str(status or "running").strip().lower()) or "running"
+    if clean_status in {"done", "completed", "complete", "resolved"} and remaining_steps:
+        return {"status": "incomplete", "project_id": project_id, "task_id": task_id,
+                "remaining_steps": list(remaining_steps),
+                "reason": "Completion cannot retain unresolved steps; checkpoint them as ongoing/deferred work."}
     if not task_id:
         task_id = "task_" + hashlib.sha256(f"{project_id}|{title}|{time.time_ns()}".encode()).hexdigest()[:16]
     task_id = re.sub(r"[^A-Za-z0-9._:-]+", "-", task_id).strip("-._:") or "task"
@@ -4037,7 +4096,12 @@ def project_task_status(
         return {"status": "rejected", "reason": "No project is attached."}
     pp = project_workspace.paths_for(paths.root, project_id)
     rows = []
-    for row in continuity.load_records(pp.memory_dir, project_id, include_legacy=False):
+    try:
+        canonical = continuity._read_goal_records(pp.memory_dir, project_id)
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return {"status": "unknown", "project_id": project_id, "task_id": task_id,
+                "reason": "canonical_task_state_unavailable"}
+    for row in canonical:
         meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
         if meta.get("adapter") != "generic_task":
             continue
@@ -4046,8 +4110,8 @@ def project_task_status(
         rows.append(row)
     if not rows:
         return {"status": "none", "project_id": project_id, "task_id": task_id}
-    rows.sort(key=lambda row: str(row.get("timestamp") or ""), reverse=True)
-    row = rows[0]
+    # Canonical append order disambiguates checkpoints in the same second.
+    row = rows[-1]
     meta = dict(row.get("metadata") or {})
     return {
         "status": "ok",
@@ -4079,6 +4143,11 @@ def project_task_finalize(
     current = project_task_status(task_id, name=name, session_id=session_id, paths=paths)
     if current.get("status") != "ok":
         return current
+    if current.get("remaining_steps"):
+        return {"status": "incomplete", "project_id": current.get("project_id"),
+                "task_id": current.get("task_id"), "remaining_steps": current["remaining_steps"],
+                "related_refs": current.get("related_refs") or [],
+                "reason": "Checkpoint the actual resolved/deferred work before finalizing; remaining steps are not completion."}
     project_id = str(current["project_id"])
     resolved_task_id = str(current["task_id"])
     title = str(current.get("title") or resolved_task_id)
@@ -4096,6 +4165,10 @@ def project_task_finalize(
             "task_id": resolved_task_id,
             "title": title,
             "status": "done",
+            "completed_steps": list(current.get("completed_steps") or []),
+            "remaining_steps": [],
+            "related_refs": list(current.get("related_refs") or []),
+            "previous_checkpoint_id": current.get("checkpoint_id"),
             "outcome": outcome,
             "finding": finding,
             "next_action": next_action,

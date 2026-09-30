@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,6 +22,7 @@ except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None
 
 import project_workspace
+import continuity
 import continuations
 import work_ledger
 import agent_runtime
@@ -351,9 +353,9 @@ def checkpoint_session(
     }
 
 
-def sync_todos(root: Path, session_id: str, todos: list[Any]) -> dict[str, Any]:
+def sync_todos(root: Path, session_id: str, todos: list[Any], *, todos_omitted: int = 0) -> dict[str, Any]:
     """Persist a bounded OpenCode TODO projection outside conversational context."""
-    return work_ledger.sync_todos(root, session_id, todos)
+    return work_ledger.sync_todos(root, session_id, todos, todos_omitted=todos_omitted)
 
 
 def mark_user_turn(root: Path, session_id: str, *, message_id: str = "") -> dict[str, Any]:
@@ -417,7 +419,8 @@ def compaction_context(root: Path, session_id: str, *, max_chars: int = 24_000) 
     reserved before project prose so operational state cannot be truncated merely
     because HANDOFF.md is large.
     """
-    project_id = project_workspace.current_project_id(root, session_id=session_id)
+    attachment = project_workspace.session_attachment_status(root, session_id)
+    project_id = attachment["project_id"]
     # Exactly the same compact policy that OpenCode loads at startup. Read only
     # the installed harness file, never a target repository's instructions. A
     # missing package file is an error, not permission to omit the invariants.
@@ -441,6 +444,16 @@ def compaction_context(root: Path, session_id: str, *, max_chars: int = 24_000) 
     reference_context = reference_catalog.compact_context(root, project_id or "", session_id=session_id, max_chars=reference_budget)
     fixed_sections = [section for section in (core_policy, task_context, acceptance_policy, acceptance_context, reference_context) if section]
     fixed_size = sum(len(section) for section in fixed_sections) + 2 * max(0, len(fixed_sections) - 1)
+    goal_recovery = continuity.load_goal_projection(
+        project_workspace.paths_for(root, project_id).memory_dir, project_id
+    ) if project_id else {"status": "none", "project_id": "", "directions": [], "checkpoints": []}
+    if attachment["status"] == "unknown":
+        goal_recovery = {"status": "unknown", "reason": "session_scope_unavailable",
+                         "directions": [], "checkpoints": []}
+    goal_budget = min(1_200, max(0, max_chars - fixed_size - 8))
+    if goal_budget >= 400 and (goal_recovery.get("status") != "none" or goal_recovery.get("checkpoints")):
+        fixed_sections.append(continuity.render_goal_projection(goal_recovery, max_chars=goal_budget))
+        fixed_size = sum(len(section) for section in fixed_sections) + 2 * max(0, len(fixed_sections) - 1)
     project_budget = max(0, max_chars - fixed_size - 8)
 
     project_context = ""
@@ -472,8 +485,206 @@ def compaction_context(root: Path, session_id: str, *, max_chars: int = 24_000) 
         "project_id": project_id or "",
         "context": context[:max_chars],
         "work_ledger": work_ledger.status(root, session_id),
+        "goal_recovery": goal_recovery,
         "acceptance_run_id": str(acceptance_state.get("run_id") or "") if acceptance_state.get("status") == "ok" and acceptance_state.get("run_status") == "running" else "",
     }
+
+
+def _recovery_work(root: Path, session_id: str) -> dict[str, Any]:
+    """Validate the atomic work snapshot without status()'s legacy migration."""
+    try:
+        state = work_ledger._read(work_ledger._path(root, session_id))
+        if not state:
+            return {"status": "none", "todos": [], "active_references": []}
+        if state.get("schema") != work_ledger.SCHEMA or state.get("session_key") != work_ledger._key(session_id):
+            raise ValueError("Unavailable work schema or identity")
+        if not isinstance(state.get("project_id"), str):
+            raise ValueError("Invalid work scope")
+        for key in ("todos_need_review", "references_need_review"):
+            if key in state and type(state[key]) is not bool:
+                raise ValueError("Invalid work review flag")
+        for row in state.get("todos", []):
+            if row.get("status") not in work_ledger._ALLOWED_STATUS:
+                raise ValueError("Invalid TODO status")
+            if "content_truncated" in row and type(row["content_truncated"]) is not bool:
+                raise ValueError("Invalid TODO omission metadata")
+            if type(row.get("record_refs_omitted", 0)) is not int or row.get("record_refs_omitted", 0) < 0:
+                raise ValueError("Invalid reference omission metadata")
+        for row in state.get("active_references", []):
+            if (not isinstance(row.get("project_id"), str) or not isinstance(row.get("reference_id"), str)
+                    or not 0 <= row.get("user_turn_generation", 0) <= state.get("user_turn_generation", 0)):
+                raise ValueError("Invalid active reference metadata")
+        state = {**work_ledger._base(session_id), **state}
+        return {**state, "status": "ok", "references_need_review": work_ledger._references_need_review(state)}
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return {"status": "unknown", "todos": [], "active_references": []}
+
+
+def _recovery_acceptance(root: Path, session_id: str, project_id: str) -> dict[str, str]:
+    """Current session pointer only; never migrate, scan by recency or infer none."""
+    try:
+        pointer_path = acceptance_runs._session_path(root, session_id)
+        try:
+            pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {"status": "none"}
+        if not isinstance(pointer, dict):
+            raise ValueError("Invalid acceptance pointer")
+        pid, run_id = pointer.get("project_id"), pointer.get("run_id")
+        if (not isinstance(pid, str) or project_workspace.clean_project_id(pid) != pid
+                or not project_workspace.project_exists(root, pid)
+                or (project_id and pid != project_id)
+                or not isinstance(run_id, str) or not re.fullmatch(r"acr_[A-Za-z0-9_-]{1,120}", run_id)):
+            raise ValueError("Invalid acceptance identity")
+        state = json.loads(acceptance_runs._path(root, pid, run_id).read_text(encoding="utf-8"))
+        if (not isinstance(state, dict) or state.get("schema") != acceptance_runs.SCHEMA
+                or state.get("project_id") != pid or state.get("run_id") != run_id
+                or state.get("origin_session_key") != acceptance_runs._session_key(session_id)
+                or state.get("status") not in {"running", "completed"}):
+            raise ValueError("Unavailable acceptance state")
+        return {"status": "active" if state["status"] == "running" else "none",
+                "project_id": pid, "run_id": run_id if state["status"] == "running" else ""}
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return {"status": "unknown"}
+
+
+def recovery_context(root: Path, session_id: str, *, max_chars: int = 2500) -> dict[str, Any]:
+    """Protocol v2: read-only exact navigation after a native summary, no transcript.
+
+    Missing state and unreadable state have different meanings. This response
+    carries no raw TODO prose, generated handoff, history or core instructions.
+    Existing atomic JSON readers and canonical privacy/supersession checks remain
+    authoritative; no new recovery ledger or model inference is introduced.
+    """
+    limit = max(600, min(2500, int(max_chars)))
+    unknown = {
+        "status": "unknown", "session_id": session_id,
+        "context": "Awoki recovery v2: scope/work/acceptance recovery is unknown. Do not infer no goal, completion or unrestricted actions. Recover authoritative session and acceptance state before acting; preserve native TODOs and the newest user request.",
+    }
+    if not session_id.strip():
+        return unknown
+    try:
+        attachment = project_workspace.session_attachment_status(root, session_id)
+        if attachment.get("status") not in {"attached", "unattached"}:
+            return unknown
+        project_id = attachment["project_id"]
+        acceptance = _recovery_acceptance(root, session_id, project_id)
+        if acceptance["status"] == "unknown":
+            return unknown
+        scope = f"scope: {attachment['status']}; project={json.dumps(project_id)}"
+        if acceptance["status"] == "active":
+            lines = ["Awoki recovery v2 (read-only snapshot)", scope,
+                     f"active acceptance: {acceptance['run_id']}; project={json.dumps(acceptance['project_id'])}",
+                     "next_call: acceptance_run_next(). Its exact restrictions override generic recovery/source/TODO actions. Do not infer PASS or resume an unrestricted investigation from this snapshot."]
+            if (project_workspace.session_attachment_status(root, session_id) != attachment
+                    or _recovery_acceptance(root, session_id, project_id) != acceptance):
+                return unknown
+            return {"status": "ok", "session_id": session_id, "context": "\n".join(lines),
+                    "acceptance_run_id": acceptance["run_id"]}
+
+        work = _recovery_work(root, session_id)
+        scope_matches = not work.get("project_id") or work["project_id"] == project_id
+        goal = continuity.load_goal_projection(project_workspace.paths_for(root, project_id).memory_dir, project_id) if project_id else {"status": "none"}
+        current = reference_catalog._current_continuity(root, project_id) if project_id else {}
+        goal_status = goal.get("status", "unknown") if current is not None else "unknown"
+        if goal_status not in {"none", "saved", "ambiguous", "unknown"}:
+            goal_status = "unknown"
+        lines = ["Awoki recovery v2 (read-only snapshot)", scope,
+                 f"saved_direction: {goal_status}; work: {work['status']}; todo_scope_matches: {str(scope_matches).lower()}",
+                 "The newest user request takes precedence; this snapshot is navigation, not a replacement task."]
+        messages = {
+            "none": "No SAVED direction is known; this does not mean no current task or erase prior source work. Continue the current user request using available evidence. Do not ask for a new task solely because no goal note exists. Exploration needs no invented goal; this is not proof of completion.",
+            "saved": "Reconcile saved direction with the newest user request; exact-read details before rebuilding TODOs or strengthening claims.",
+            "ambiguous": "Competing or revised directions need reconciliation; no single goal is selected.",
+            "unknown": "Saved direction recovery is unknown; do not infer an empty/completed plan or invent missing findings.",
+        }
+        lines.append(messages[goal_status])
+        candidates: list[tuple[str, str]] = []
+        if goal_status != "unknown":
+            for group in ("directions", "checkpoints", "unresolved_revisions"):
+                for row in goal.get(group, []):
+                    ref = row.get("record_id")
+                    if (not isinstance(ref, str) or not ref.startswith("cont_")
+                            or reference_catalog._clean_ref(ref) != ref or ref not in (current or {})):
+                        # A canonical change between snapshots invalidates the
+                        # projection, rather than leaking its retired identity.
+                        return unknown
+                    candidates.append((group, ref))
+
+        todos = work.get("todos", [])
+        if work["status"] == "unknown":
+            lines.append("TODO counts/review/omissions unknown; preserve native TODOs, do not clear them.")
+        else:
+            counts = {status: sum(row.get("status") == status for row in todos)
+                      for status in ("pending", "in_progress", "completed", "cancelled")}
+            omitted = work.get("todos_omitted", 0)
+            shortened = sum(row.get("content_truncated") is True for row in todos)
+            refs_omitted = sum(row.get("record_refs_omitted", 0) for row in todos)
+            lines.append("TODO counts: " + ", ".join(f"{key}={value}" for key, value in counts.items())
+                         + f"; review={str(bool(work.get('todos_need_review')) or not scope_matches).lower()}; omitted={omitted}; shortened={shortened}; refs_omitted={refs_omitted}")
+            lines.append(f"reference_review={str(bool(work.get('references_need_review'))).lower()}; TODOs are operational hints, not evidence or completion proof.")
+            if not scope_matches:
+                lines.append("TODOs belong to another project; no previous-project IDs or task prose are projected. Reconcile current native TODOs.")
+            if omitted or shortened or refs_omitted:
+                lines.append("Omitted/shortened work is not complete; inspect session_work_status once if needed, without overwriting native TODOs from the mirror.")
+
+        # Only current safe canonical note IDs are projected from TODO hints.
+        # Other evidence identities need their own typed freshness checks; never
+        # mislabel them as continuity-note IDs or revive stale catalog labels.
+        hidden_hints = 0
+        if scope_matches and project_id and current is not None and goal_status != "unknown":
+            hints = [ref for row in todos for ref in row.get("record_refs", [])]
+            hints += [row["reference_id"] for row in work.get("active_references", [])
+                      if row.get("project_id") == project_id
+                      and row.get("user_turn_generation", 0) == work.get("user_turn_generation", 0)]
+            seen = {ref for _, ref in candidates}
+            for ref in dict.fromkeys(hints):
+                if ref in seen:
+                    continue
+                if not ref.startswith("cont_") or ref not in current:
+                    hidden_hints += 1
+                    continue
+                desc = reference_catalog._base_description(root, project_id, ref, session_id=session_id, _continuity_map=current)
+                row = current[ref]
+                checkpoint = row.get("kind") == "checkpoint" or "investigation-checkpoint" in (row.get("tags") or [])
+                checkpoint_closed = checkpoint and str(row.get("state") or "").lower() in {"done", "complete", "completed", "closed", "resolved", "retired", "superseded", "cancelled", "canceled"}
+                if desc.get("status") != "ok" or checkpoint_closed:
+                    hidden_hints += 1
+                    continue
+                candidates.append(("current_note", ref)); seen.add(ref)
+        if hidden_hints:
+            lines.append("Some reference hints are unavailable or need their typed verifier; no hidden/stale IDs or labels are projected.")
+        goal_omitted = sum(goal.get("omitted", {}).values())
+        if goal_omitted:
+            lines.append(f"Saved direction/checkpoint candidates omitted: {goal_omitted}; do not select a goal by recency.")
+
+        # Reserve complete exact-call lines and an omission notice; never cut IDs.
+        footer = "Navigation entries omitted: {count}; recover session_work_status and exact saved notes selectively. Missing detail is not missing work."
+        rendered: list[str] = []
+        for group, ref in candidates:
+            row = f"{group}: {ref}"
+            prospective = rendered + [ref]
+            calls = ["next_call: project_search(" + json.dumps({"name": project_id, "record_ids": prospective[start:start + 3]}, separators=(",", ":")) + ")"
+                     for start in range(0, len(prospective), 3)]
+            if len("\n".join([*lines, row, *calls, footer.format(count=len(candidates))])) > limit:
+                break
+            lines.append(row); rendered.append(ref)
+        lines += ["next_call: project_search(" + json.dumps({"name": project_id, "record_ids": rendered[start:start + 3]}, separators=(",", ":")) + ")"
+                  for start in range(0, len(rendered), 3)]
+        if len(rendered) < len(candidates):
+            lines.append(footer.format(count=len(candidates) - len(rendered)))
+        if len("\n".join(lines)) > limit:
+            # Very small caller budget: retain scope/status and explicit absence
+            # of detail, never an apparently complete cut-off projection.
+            lines = lines[:3] + [footer.format(count=len(candidates))]
+        if (project_workspace.session_attachment_status(root, session_id) != attachment
+                or _recovery_acceptance(root, session_id, project_id) != acceptance):
+            return unknown
+        if len("\n".join(lines)) > limit:
+            return unknown
+        return {"status": "ok", "session_id": session_id, "context": "\n".join(lines)}
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+        return unknown
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -501,6 +712,10 @@ def _parser() -> argparse.ArgumentParser:
     context = sub.add_parser("context")
     context.add_argument("--session-id", required=True)
     context.add_argument("--max-chars", type=int, default=24_000)
+
+    recovery = sub.add_parser("recovery-context")
+    recovery.add_argument("--session-id", required=True)
+    recovery.add_argument("--max-chars", type=int, default=2500)
 
     switch = sub.add_parser("switch")
     switch.add_argument("--session-id", required=True)
@@ -581,6 +796,8 @@ def main(argv: list[str] | None = None) -> int:
         result = checkpoint_session(root, args.session_id, reason=args.reason, detach=args.detach, force=args.force)
     elif args.command == "context":
         result = compaction_context(root, args.session_id, max_chars=max(2_000, args.max_chars))
+    elif args.command == "recovery-context":
+        result = recovery_context(root, args.session_id, max_chars=args.max_chars)
     elif args.command == "switch":
         result = prepare_project_switch(root, args.session_id, args.target_project)
     elif args.command == "todo-sync":
@@ -588,8 +805,9 @@ def main(argv: list[str] | None = None) -> int:
             payload = json.load(sys.stdin)
         except (json.JSONDecodeError, OSError):
             payload = {}
-        todos = payload.get("todos") if isinstance(payload, dict) else []
-        result = sync_todos(root, args.session_id, todos if isinstance(todos, list) else [])
+        todos = payload.get("todos") if isinstance(payload, dict) else None
+        result = sync_todos(root, args.session_id, todos,
+                            todos_omitted=payload.get("todos_omitted", 0) if isinstance(payload, dict) else 0)
     elif args.command == "user-turn":
         result = mark_user_turn(root, args.session_id, message_id=args.message_id)
     elif args.command == "agent-turn-terminal":

@@ -10,26 +10,55 @@ SCRIPT = r'''
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 const [pluginPath, scenario] = process.argv.slice(2);
-const bridge = [], calls = [], logs = [];
+const bridge = [], calls = [], logs = [], payloads = [];
+const failures = new Map();
+const responseOverrides = new Map();
+let invalidResponse = "", hangingCommand = "", killed = 0;
+let delayRecovery = false, releaseRecovery;
+const safeRecovery = "Awoki recovery snapshot: verified scope; no saved goal is valid exploration. Follow the newest user request. Read exact note details only if needed.";
+if (scenario === "bridge_timeout" || scenario === "logging_timeout" || scenario === "recovery_timeout") {
+  const schedule = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...args) => schedule(fn, [15000, 2000].includes(ms) ? 5 : ms, ...args);
+}
 let delayFirstUser = false, releaseFirstUser, durableUser = "";
 globalThis.Bun = { spawn: (args, options) => {
   bridge.push(args.slice(2));
-  assert.equal(options.stdin, "ignore", "These hooks must send no private payload");
-  let exited = Promise.resolve(0);
-  if (args[2] === "user-turn") {
+  const command = args[2];
+  if (command === "todo-sync") payloads.push(options.stdin.text().then(JSON.parse));
+  else assert.equal(options.stdin, "ignore", "These hooks must send no private payload");
+  const failed = (failures.get(command) || 0) > 0;
+  if (failed) failures.set(command, failures.get(command) - 1);
+  let exited = Promise.resolve(failed ? 1 : 0);
+  if (command === hangingCommand) exited = new Promise(() => {});
+  if (command === "recovery-context" && delayRecovery) exited = new Promise(resolve => {releaseRecovery = () => resolve(0);});
+  if (command === "user-turn" && !failed && command !== hangingCommand && command !== invalidResponse) {
     const id = args[args.indexOf("--message-id") + 1];
     if (delayFirstUser && id === "u1") exited = new Promise(resolve => { releaseFirstUser = () => {durableUser = id; resolve(0);}; });
     else durableUser = id;
   }
   if (args[2] === "agent-turn-terminal" && !args.includes("--is-summary"))
     assert.equal(args[args.indexOf(args.includes("--compaction-continuation-of") ? "--compaction-continuation-of" : "--parent-message-id") + 1], durableUser, "Terminal must follow the latest durable user registration");
-  return {stdout: new Response("{}").body, stderr: new Response("").body, exited};
+  const mid = args[args.indexOf("--message-id") + 1];
+  const isSummary = args.includes("--is-summary");
+  const response = command === "user-turn" ? {status: "marked", agent_runtime: {
+      status: "user_turn_recorded", current_turn: {user_message_id: mid}}}
+    : command === "agent-turn-terminal" ? {status: isSummary ? "summary_recorded" : "recorded",
+      [isSummary ? "last_compaction_turn" : "last_terminal_turn"]: {
+        message_id: mid, parent_message_id: args[args.indexOf("--parent-message-id") + 1], is_summary: isSummary}}
+    : command === "recovery-context" ? {status: "ok", session_id: args[args.indexOf("--session-id") + 1], context: safeRecovery}
+    : {};
+  return {stdout: new Response(command === invalidResponse ? "not-json"
+      : responseOverrides.has(command) ? responseOverrides.get(command) : JSON.stringify(response)).body,
+    stderr: new Response("").body, exited, kill: () => {killed++;}};
 }};
 let lookup = async () => { throw new Error("Unexpected exact lookup"); };
 let active = 0, maxActive = 0;
 const { AwokiContinuity } = await import(pathToFileURL(pluginPath).href);
 const client = {
-  app: {log: async value => logs.push(value)},
+  app: {log: async value => {
+    logs.push(value);
+    if (scenario === "logging_timeout") return new Promise(() => {});
+  }},
   session: {message: async request => {
     calls.push(request); active++; maxActive = Math.max(maxActive, active);
     try { return await lookup(request); } finally { active--; }
@@ -78,8 +107,309 @@ const witness = async (uid = "u1") => {
   await user(uid); await compacting(); await summaryText(); lookup = nativeLookup;
   await autocontinue(); await compacted();
 };
+const recoveryMessages = (summaryID = "saved-summary", userID = "resumed-user") => [
+  {info: info(summaryID, "marker", {summary: true}), parts: [part("text", {text: "PRIVATE_SUMMARY_CANARY"}, summaryID)]},
+  nativeUser(userID, [part("text", {text: "PRIVATE_NEWEST_REQUEST_CANARY"}, userID)]).data,
+];
+const transform = async messages => {
+  await hooks["experimental.chat.messages.transform"]({}, {messages});
+  return messages;
+};
 
-if (scenario === "session_metadata_after_idle") {
+if (scenario === "recovery_retained_tail") {
+  for (const retainedTail of [false, true]) {
+    const summaryID = "summary-tail-" + retainedTail;
+    const summary = recoveryMessages(summaryID)[0];
+    const original = structuredClone(summary), originalParts = summary.parts;
+    const marker = nativeUser("marker", [part("compaction", {auto: false}, "marker")]).data;
+    const rows = [marker, summary, ...(retainedTail ? [exact("retained-answer", "old-human").data] : [])];
+    const before = bridge.length;
+    await transform(rows);
+    assert.equal(rows.length, retainedTail ? 3 : 2, "Fallback cannot invent a user turn");
+    assert.equal(rows[1].parts.length, 2);
+    assert.notEqual(rows[1], summary, "Only the outgoing row is replaced");
+    assert.equal(summary.parts, originalParts);
+    assert.deepEqual(summary, original, "Original summary body and canonical part objects remain untouched");
+    assert.equal(rows[1].parts.at(-1).messageID, summaryID);
+    assert.equal(rows[1].parts.at(-1).text, safeRecovery);
+    assert.deepEqual(bridge.slice(before), [["recovery-context", "--session-id", sid]], "Fallback performs one local state read only");
+    await transform(rows); assert.equal(rows[1].parts.length, 2, "Fallback remains once per summary");
+  }
+} else if (scenario === "recovery_retained_tail_invalid") {
+  for (const defect of ["no-marker", "wrong-parent", "real-human", "new-marker", "summarizer-head"]) {
+    const summary = recoveryMessages("invalid-" + defect)[0];
+    const marker = nativeUser("marker", [part("compaction", {auto: false}, "marker")]).data;
+    let rows = [marker, summary, exact("retained-answer", "old-human").data];
+    if (defect === "no-marker") rows.shift();
+    if (defect === "wrong-parent") summary.info.parentID = "different-marker";
+    if (defect === "real-human") marker.parts.push(part("text", {text: "PRIVATE_USER_CANARY"}, "marker"));
+    if (defect === "new-marker") rows.push(nativeUser("next-marker", [part("compaction", {auto: true}, "next-marker")]).data);
+    if (defect === "summarizer-head") rows = [exact("old-answer", "old-human").data];
+    const original = structuredClone(rows); await transform(rows);
+    assert.deepEqual(rows, original, "Only an exact completed native summary pair permits fallback");
+  }
+} else if (scenario === "compaction_reference_framing") {
+  responseOverrides.set("context", JSON.stringify({context: "Saved direction and exact record IDs."}));
+  const output = {context: []}; await hooks["experimental.session.compacting"]({sessionID: sid}, output);
+  assert.equal(output.context.length, 1);
+  assert.match(output.context[0], /^Awoki reference state for summarization only\./);
+  assert.match(output.context[0], /Tools are unavailable here/);
+  assert.match(output.context[0], /do not execute tools or emit tool-call markup/);
+  assert.ok(output.context[0].includes("Saved direction and exact record IDs."));
+  assert.match(output.context[0], /perform recovery calls on the next investigation turn\.$/);
+  const request = bridge.filter(row => row[0] === "context").at(-1);
+  const budget = Number(arg(request, "--max-chars"));
+  assert.ok(budget < 24000 && budget > 23000);
+  responseOverrides.set("context", JSON.stringify({context: "x".repeat(budget)}));
+  const full = {context: []}; await hooks["experimental.session.compacting"]({sessionID: sid}, full);
+  assert.equal(full.context[0].length, 24000, "Framing fits inside the existing total context limit");
+} else if (scenario === "recovery_reminder") {
+  for (const mode of ["synthetic", "overflow-replay", "new-human"]) {
+    const messages = recoveryMessages("summary-" + mode, mode);
+    if (mode === "synthetic") {
+      messages[1] = syntheticUser().data;
+    } else if (mode === "new-human") {
+      messages.splice(1, 0, syntheticUser().data);
+    }
+    const before = bridge.length;
+    await transform(messages);
+    const reminder = messages.at(-1).parts.at(-1);
+    assert.equal(reminder.type, "text");
+    assert.equal(reminder.synthetic, true);
+    assert.equal(reminder.messageID, messages.at(-1).info.id);
+    assert.equal(reminder.text, safeRecovery);
+    assert.ok(!reminder.text.includes("session_work_status"), "Verified no-goal snapshot requires no extra model call");
+    assert.deepEqual(bridge.slice(before), [["recovery-context", "--session-id", sid]], "Snapshot must use only one local state read");
+    const fresh = recoveryMessages("summary-" + mode, "next-tool-loop-user");
+    await transform(fresh);
+    assert.equal(fresh.at(-1).parts.length, 1, "One reminder per summary, not every tool iteration");
+  }
+} else if (scenario === "recovery_concurrent") {
+  delayRecovery = true;
+  const first = recoveryMessages(), duplicate = recoveryMessages();
+  const pending = transform(first); await until(() => Boolean(releaseRecovery));
+  await transform(duplicate);
+  assert.equal(duplicate.at(-1).parts.length, 1, "Concurrent duplicate must not deliver unverified context");
+  assert.equal(bridge.filter(row => row[0] === "recovery-context").length, 1);
+  releaseRecovery(); await pending;
+  assert.equal(first.at(-1).parts.at(-1).text, safeRecovery);
+  await transform(duplicate);
+  assert.equal(duplicate.at(-1).parts.length, 1, "Only one delivery per summary");
+} else if (scenario === "recovery_races") {
+  for (const race of ["human", "deleted", "scope", "todo", "acceptance", "pending-user", "resolved-unknown", "maintenance", "replacement", "new-marker", "mutated-identity"]) {
+    delayRecovery = true; releaseRecovery = undefined;
+    const summaryID = "race-" + race;
+    const rows = recoveryMessages(summaryID);
+    const output = {messages: rows};
+    const pending = hooks["experimental.chat.messages.transform"]({}, output);
+    await until(() => Boolean(releaseRecovery));
+    let finishLookup, userCheck;
+    if (race === "human") await user("new-human");
+    if (race === "resolved-unknown") {
+      lookup = async () => ({});
+      await emit("message.updated", {info: {id: "resolved-unknown", sessionID: sid, role: "user"}});
+    }
+    if (race === "maintenance") await hooks["tool.execute.after"]({sessionID: sid, tool: "awoki_project_capture"});
+    if (race === "deleted") await emit("session.deleted", {info: {id: sid}});
+    if (race === "scope") await hooks["tool.execute.before"]({sessionID: sid, tool: "awoki_project_open"}, {args: {name: "new-project"}});
+    if (race === "todo") await emit("todo.updated", {sessionID: sid, todos: []});
+    if (race === "acceptance") await hooks["tool.execute.before"]({sessionID: sid, tool: "awoki_acceptance_run_start"}, {args: {}});
+    if (race === "pending-user") {
+      lookup = async () => new Promise(resolve => {finishLookup = () => resolve({});});
+      userCheck = emit("message.updated", {info: {id: "unknown-user", sessionID: sid, role: "user"}});
+      await until(() => Boolean(finishLookup));
+    }
+    if (race === "replacement") output.messages = recoveryMessages(summaryID);
+    if (race === "new-marker") rows.push(nativeUser("next-marker", [part("compaction", {auto: true}, "next-marker")]).data);
+    if (race === "mutated-identity") rows.at(-1).info.id = "changed-target";
+    releaseRecovery(); await pending;
+    assert.equal(rows[1].parts.length, 1, race + ": stale snapshot must not be delivered");
+    if (userCheck) {finishLookup(); await userCheck;}
+    delayRecovery = false;
+    if (race !== "deleted") {
+      const retry = recoveryMessages(summaryID);
+      const reads = bridge.filter(row => row[0] === "recovery-context").length;
+      await transform(retry);
+      assert.match(retry.at(-1).parts.at(-1).text, /recovery is unknown/);
+      assert.equal(bridge.filter(row => row[0] === "recovery-context").length, reads, "Raced state must not trigger repeated reads");
+    }
+  }
+} else if (scenario === "recovery_unknown") {
+  const responses = ["{}", "not-json", "[]", JSON.stringify({status: "ok", context: safeRecovery}),
+    JSON.stringify({status: "ok", session_id: "wrong-session", context: safeRecovery}),
+    JSON.stringify({status: "complete", session_id: sid, context: safeRecovery}),
+    JSON.stringify({status: "ok", session_id: sid, context: " "}),
+    JSON.stringify({status: "ok", session_id: sid, context: "x".repeat(2501)}),
+  ];
+  for (const [index, response] of responses.entries()) {
+    responseOverrides.set("recovery-context", response);
+    const rows = recoveryMessages("unknown-" + index); await transform(rows);
+    const text = rows.at(-1).parts.at(-1).text;
+    assert.match(text, /scope, work and acceptance state could not be verified/);
+    assert.match(text, /Do not infer no goal, completion or unrestricted actions/);
+    assert.ok(!text.includes("session_work_status"), "Unknown acceptance cannot silently authorize generic recovery");
+    await transform(recoveryMessages("unknown-" + index));
+  }
+  assert.equal(bridge.filter(row => row[0] === "recovery-context").length, responses.length);
+  responseOverrides.delete("recovery-context"); failures.set("recovery-context", 1);
+  const failed = recoveryMessages("failed-exit"); await transform(failed);
+  assert.match(failed.at(-1).parts.at(-1).text, /recovery is unknown/, "A failed process cannot deliver its apparently valid stdout");
+  const partial = "Verified scope; work:unknown; goal:saved; read exact cont_fixture by project_search.";
+  responseOverrides.set("recovery-context", JSON.stringify({status: "ok", session_id: sid, context: partial, untrusted_extra: "PRIVATE_PAYLOAD_CANARY"}));
+  const rows = recoveryMessages("partial"); await transform(rows);
+  assert.equal(rows.at(-1).parts.at(-1).text, partial, "Explicit partial-state warnings remain intact");
+  responseOverrides.set("recovery-context", JSON.stringify({status: "unknown", session_id: sid, context: "Unknown acceptance; recover authoritative state first."}));
+  const unknown = recoveryMessages("backend-unknown"); await transform(unknown);
+  assert.equal(unknown.at(-1).parts.at(-1).text, "Unknown acceptance; recover authoritative state first.");
+} else if (scenario === "recovery_timeout") {
+  hangingCommand = "recovery-context";
+  const rows = recoveryMessages(); await transform(rows);
+  assert.match(rows.at(-1).parts.at(-1).text, /recovery is unknown/);
+  assert.equal(killed, 1);
+  for (let index = 0; index < 4; index++) await transform(recoveryMessages());
+  assert.equal(bridge.filter(row => row[0] === "recovery-context").length, 1, "Timeout delivers unknown once without retry loop");
+} else if (scenario === "recovery_acceptance") {
+  const context = "Verified active acceptance run fixture-run. Use acceptance_run_next before other actions.";
+  responseOverrides.set("recovery-context", JSON.stringify({status: "ok", session_id: sid, context, acceptance_run_id: "fixture-run"}));
+  const rows = recoveryMessages(); await transform(rows);
+  assert.equal(rows.at(-1).parts.at(-1).text, context);
+  assert.ok(!rows.at(-1).parts.at(-1).text.includes("session_work_status"));
+  await hooks["tool.execute.before"]({sessionID: sid, tool: "read"}, {args: {path: "synthetic-fixture"}});
+  assert.equal(bridge.filter(row => row[0] === "acceptance-tool").length, 1, "Snapshot restores native acceptance bookkeeping after restart");
+} else if (scenario === "recovery_invalid") {
+  const cases = [
+    [], [nativeUser("human", []).data], recoveryMessages().slice(0, 1),
+    (() => { const rows = recoveryMessages(); rows[0].info.error = {name: "aborted"}; return rows; })(),
+    (() => { const rows = recoveryMessages(); rows[0].info.time.completed = undefined; return rows; })(),
+    (() => { const rows = recoveryMessages(); rows[0].info.finish = "length"; return rows; })(),
+    (() => { const rows = recoveryMessages(); rows[1].info.sessionID = "other"; return rows; })(),
+    (() => { const rows = recoveryMessages(); rows[1].parts[0].sessionID = "other"; return rows; })(),
+    (() => { const rows = recoveryMessages(); rows[1].parts[0].messageID = "other"; return rows; })(),
+    (() => { const rows = recoveryMessages(); rows[1].parts.push(part("compaction", {auto: true}, "resumed-user")); return rows; })(),
+    (() => { const rows = recoveryMessages(); rows.push({info: info("incomplete-summary", "resumed-user", {summary: true, finish: ""}), parts: []}); return rows; })(),
+  ];
+  for (const rows of cases) {
+    const original = structuredClone(rows);
+    await transform(rows);
+    assert.deepEqual(rows, original, "Unknown/failed/mixed-session/summarizer input must remain unchanged");
+  }
+  const valid = recoveryMessages(); await transform(valid);
+  assert.equal(valid.at(-1).parts.length, 2, "Rejected input must not consume recovery eligibility");
+} else if (scenario === "recovery_restart") {
+  const first = recoveryMessages(); await transform(first);
+  const second = await AwokiContinuity({directory: "/owned/project", client});
+  await second["experimental.chat.messages.transform"]({}, {messages: first});
+  assert.equal(first.at(-1).parts.length, 2, "Duplicate plugin registration cannot add another reminder");
+  const third = await AwokiContinuity({directory: "/owned/project", client});
+  const resumed = recoveryMessages();
+  await third["experimental.chat.messages.transform"]({}, {messages: resumed});
+  assert.equal(resumed.at(-1).parts.length, 2, "Restart re-derives recovery from actual summary identity");
+  assert.equal(calls.length, 0, "Recovery detection must not scan or fetch transcript text");
+} else if (scenario === "failed_user_retry" || scenario === "logging_timeout") {
+  failures.set("user-turn", 1);
+  await user();
+  assert.equal(durableUser, "");
+  await emit("message.updated", {info: {id: "u1", sessionID: sid, role: "user"}});
+  assert.equal(generations().length, 2);
+  await delta(); lookup = async () => exact();
+  await idle(); await user();
+  assert.equal(terminals().length, 1);
+  assert.equal(generations().length, 2, "Acknowledged users remain idempotent");
+} else if (scenario === "failed_user_bounded") {
+  failures.set("user-turn", 20);
+  await user(); await delta(); lookup = async () => exact();
+  for (let i=0; i<5; i++) { await idle(); await user(); }
+  assert.equal(generations().length, 2, "Broken storage permits only one event-driven retry");
+  assert.equal(terminals().length, 0, "Unacknowledged human cannot receive a terminal receipt");
+  assert.equal(calls.length, 0, "Do not fetch terminal metadata until persistence succeeds");
+} else if (scenario === "failed_old_user") {
+  failures.set("user-turn", 1);
+  await user(); await user("u2"); await user("u1");
+  await delta("a2"); lookup = async () => exact("a2", "u2"); await idle();
+  assert.deepEqual(generations().map(row => arg(row, "--message-id")), ["u1", "u2"]);
+  assert.equal(arg(terminals()[0], "--parent-message-id"), "u2");
+} else if (scenario === "failed_terminal_retry" || scenario === "failed_compaction_terminal_retry") {
+  if (scenario === "failed_compaction_terminal_retry") { await witness(); await delta("answer"); }
+  else { await user(); await delta(); lookup = async () => exact(); }
+  failures.set("agent-turn-terminal", 1);
+  await idle(); await Promise.all([idle(), idle()]); await idle();
+  assert.equal(terminals().length, 2);
+  assert.deepEqual(terminals()[0], terminals()[1], "Retry preserves the exact identity and native compaction witness");
+} else if (scenario === "failed_terminal_bounded") {
+  await user(); await delta(); lookup = async () => exact();
+  failures.set("agent-turn-terminal", 20);
+  for (let i=0; i<5; i++) await idle();
+  assert.equal(terminals().length, 2);
+} else if (scenario === "bridge_timeout" || scenario === "invalid_bridge_response") {
+  if (scenario === "bridge_timeout") hangingCommand = "user-turn";
+  else invalidResponse = "user-turn";
+  await user();
+  assert.equal(durableUser, "");
+  hangingCommand = ""; invalidResponse = "";
+  await user(); await delta(); lookup = async () => exact(); await idle();
+  assert.equal(terminals().length, 1);
+  assert.equal(generations().length, 2);
+  if (scenario === "bridge_timeout") assert.equal(killed, 1);
+} else if (scenario === "malformed_todos") {
+  const valid = {id: "t1", content: "Inspect exact saved reference", status: "pending", priority: "medium"};
+  await emit("todo.updated", {sessionID: sid, todos: [valid]});
+  for (const todos of [null, undefined, {}, [null], ["bad"], [{...valid, content: 7}],
+      [{...valid, status: "unknown"}], [{...valid, priority: "unknown"}], [{...valid, content: " "}]])
+    await emit("todo.updated", {sessionID: sid, todos});
+  await emit("todo.updated", {sessionID: sid, todos: []});
+  assert.deepEqual(await Promise.all(payloads), [{todos: [{...valid,
+    content_truncated: false}], todos_omitted: 0}, {todos: [], todos_omitted: 0}]);
+} else if (scenario === "todo_truncation_metadata") {
+  const refs = Array.from({length: 10}, (_, n) => "cont_saved_" + n);
+  const valid = {id: "t1", content: "x".repeat(810) + " " + refs.join(" "), status: "pending", priority: "medium"};
+  await emit("todo.updated", {sessionID: sid, todos: Array.from({length: 70}, (_, n) => ({...valid, id: "t" + n}))});
+  const payload = (await Promise.all(payloads))[0];
+  assert.equal(payload.todos.length, 64);
+  assert.equal(payload.todos_omitted, 6);
+  assert.equal(payload.todos[0].content, valid.content, "Bridge receives references after800 within original context for canonical redaction");
+  assert.equal(payload.todos[0].content_truncated, false);
+  assert.ok(!("record_refs" in payload.todos[0]), "Plugin must not extract potential credential-shaped reference strings");
+  assert.ok(!("record_refs_omitted" in payload.todos[0]));
+  await emit("todo.updated", {sessionID: sid, todos: [{...valid, content: "x".repeat(8300)}]});
+  const oversized = (await Promise.all(payloads))[1];
+  assert.equal(oversized.todos[0].content.length, 8192);
+  assert.equal(oversized.todos[0].content_truncated, true);
+} else if (scenario === "unacknowledged_bridge_status") {
+  const invalid = ["", "{}", '{"status":"ignored"}', '{"status":"marked"}',
+    JSON.stringify({status: "marked", agent_runtime: {status: "user_turn_recorded", current_turn: {user_message_id: "other"}}})];
+  for (let n=0; n<invalid.length; n++) {
+    responseOverrides.set("user-turn", invalid[n]);
+    await user("invalid-user-" + n);
+    responseOverrides.delete("user-turn");
+    const before = generations().length;
+    await user("invalid-user-" + n);
+    assert.equal(generations().length, before + 1, "Exit zero alone must not consume the durable-user guard");
+  }
+  await user("terminal-user"); await delta("terminal-answer");
+  lookup = async () => exact("terminal-answer", "terminal-user");
+  responseOverrides.set("agent-turn-terminal", "{}"); await idle();
+  responseOverrides.delete("agent-turn-terminal"); await idle(); await idle();
+  assert.equal(terminals().length, 2, "Empty successful terminal output is unavailable, allowing one retry");
+} else if (scenario === "duplicate_bridge_status") {
+  responseOverrides.set("user-turn", JSON.stringify({status: "unchanged", agent_runtime: {
+    status: "duplicate", current_turn: {user_message_id: "u1"}}}));
+  await user(); await user();
+  assert.equal(generations().length, 1);
+  await delta(); lookup = async () => exact();
+  responseOverrides.set("agent-turn-terminal", JSON.stringify({status: "duplicate",
+    last_terminal_turn: {message_id: "a1", parent_message_id: "u1", is_summary: false}}));
+  await idle(); await idle();
+  assert.equal(terminals().length, 1, "Exact duplicate receipt is a durable acknowledgment");
+} else if (scenario === "sdk_session_deleted") {
+  await user(); await emit("session.deleted", {info: {id: sid}});
+  const deletion = bridge.find(row => row[0] === "continuation-cancel");
+  assert.equal(arg(deletion, "--session-id"), sid);
+  const before = bridge.length;
+  await emit("message.updated", {info: {id: "not-a-session", role: "assistant"}});
+  assert.equal(bridge.length, before, "Generic IDs must never be interpreted as session identity");
+  await delta(); lookup = async () => exact(); await idle();
+  assert.equal(terminals().length, 0, "Deletion clears human attribution");
+} else if (scenario === "session_metadata_after_idle") {
   for (const phase of ["answer", "synthetic"]) {
     await witness("human-" + phase); await delta("answer");
     let release;
@@ -489,6 +819,81 @@ class PluginMessageFallbackTests(unittest.TestCase):
                 env={"PATH": "/opt/homebrew/bin:/usr/bin:/bin"}, cwd=directory,
                 capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_recovery_concurrent_transforms_read_and_deliver_once(self):
+        self.run_scenario("recovery_concurrent")
+
+    def test_recovery_discards_changed_user_scope_transcript_and_deleted_session(self):
+        self.run_scenario("recovery_races")
+
+    def test_recovery_invalid_receipts_are_unknown_and_partial_warnings_survive(self):
+        self.run_scenario("recovery_unknown")
+
+    def test_recovery_timeout_is_unknown_without_retry_loop(self):
+        self.run_scenario("recovery_timeout")
+
+    def test_recovery_preserves_restricted_acceptance_and_restores_bookkeeping(self):
+        self.run_scenario("recovery_acceptance")
+
+    def test_transient_recovery_covers_native_replay_and_new_user_without_looping(self):
+        self.run_scenario("recovery_reminder")
+
+    def test_retained_assistant_tail_recovers_without_creating_or_mutating_canonical_message(self):
+        self.run_scenario("recovery_retained_tail")
+
+    def test_retained_tail_fallback_requires_exact_summary_marker_pair(self):
+        self.run_scenario("recovery_retained_tail_invalid")
+
+    def test_compaction_frames_reference_state_and_keeps_existing_context_budget(self):
+        self.run_scenario("compaction_reference_framing")
+
+    def test_recovery_rejects_failed_compaction_mixed_scope_and_summarizer_input(self):
+        self.run_scenario("recovery_invalid")
+
+    def test_plugin_restart_recovers_from_summary_identity_without_transcript_reads(self):
+        self.run_scenario("recovery_restart")
+
+    def test_failed_user_write_can_retry_without_reclassifying_the_human(self):
+        self.run_scenario("failed_user_retry")
+
+    def test_unavailable_logging_cannot_hang_recovery_after_bridge_failure(self):
+        self.run_scenario("logging_timeout")
+
+    def test_failed_user_write_is_bounded_and_blocks_terminal_attribution(self):
+        self.run_scenario("failed_user_bounded")
+
+    def test_old_failed_user_cannot_replay_over_newer_direction(self):
+        self.run_scenario("failed_old_user")
+
+    def test_terminal_write_retries_once_and_then_is_idempotent(self):
+        self.run_scenario("failed_terminal_retry")
+
+    def test_failed_terminal_write_preserves_exact_compaction_witness(self):
+        self.run_scenario("failed_compaction_terminal_retry")
+
+    def test_terminal_write_failures_cannot_loop(self):
+        self.run_scenario("failed_terminal_bounded")
+
+    def test_hung_bridge_is_killed_and_does_not_consume_acknowledgment(self):
+        self.run_scenario("bridge_timeout")
+
+    def test_invalid_bridge_json_does_not_consume_acknowledgment(self):
+        self.run_scenario("invalid_bridge_response")
+
+    def test_malformed_todo_payload_does_not_clear_valid_work(self):
+        self.run_scenario("malformed_todos")
+
+    def test_todo_bridge_transports_bounded_original_for_canonical_redaction(self):
+        self.run_scenario("todo_truncation_metadata")
+
+    def test_bridge_exit_zero_without_persisted_status_does_not_acknowledge(self):
+        self.run_scenario("unacknowledged_bridge_status")
+
+    def test_exact_duplicate_bridge_receipts_acknowledge_idempotently(self):
+        self.run_scenario("duplicate_bridge_status")
+
+    def test_sdk_session_deletion_shape_is_scoped_to_lifecycle_events(self):
+        self.run_scenario("sdk_session_deleted")
 
     def test_post_idle_session_metadata_preserves_exact_continuation_lookups(self):
         self.run_scenario("session_metadata_after_idle")

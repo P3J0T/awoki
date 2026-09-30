@@ -423,7 +423,7 @@ def project_continuation_finalize(reason: str = "completed", session_id: str = "
 
 @mcp.tool()
 def session_work_status(session_id: str = "") -> dict[str, Any]:
-    """Return the durable OpenCode TODO/work snapshot for this session, including unattached/ad-hoc work."""
+    """Recover this session's durable TODOs, current project scope and saved direction/checkpoint pointers after compaction or restart. Follow goal_recovery.next_calls for exact notes before rebuilding TODOs; reconcile with the newest user request. No saved goal is valid; status unknown means recovery failed, not no goal. Also supports unattached/ad-hoc work."""
     return core_session_work_status(session_id=session_id)
 
 

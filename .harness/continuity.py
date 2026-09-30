@@ -403,9 +403,16 @@ def legacy_to_record(project_id: str, row: Mapping[str, Any], default_kind: str)
     )
 
 
-def load_records(memory_dir: Path, project_id: str, include_legacy: bool = True) -> list[dict[str, Any]]:
+def load_records(memory_dir: Path, project_id: str, include_legacy: bool = True, *,
+                 canonical_records: Iterable[Mapping[str, Any]] | None = None) -> list[dict[str, Any]]:
     canonical_path = memory_dir / "continuity.jsonl"
-    canonical = read_jsonl(canonical_path)
+    canonical = read_jsonl(canonical_path) if canonical_records is None else [dict(row) for row in canonical_records]
+    # A caller may provide one validated snapshot instead of reopening the
+    # journal. Keep canonical append order when timestamps coincide.
+    if canonical_records is not None:
+        for index, row in enumerate(canonical, 1):
+            row.setdefault("_source_file", str(canonical_path))
+            row.setdefault("_line", index)
     canonical_ids = {str(r.get("id")) for r in canonical if r.get("id")}
     records = list(canonical)
     if include_legacy:
@@ -435,6 +442,200 @@ def active_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]
     for row in rows:
         superseded.update(str(v) for v in row.get("supersedes", []) if v)
     return [r for r in rows if str(r.get("id")) not in superseded]
+
+
+def _read_goal_records(memory_dir: Path, project_id: str) -> list[dict[str, Any]]:
+    """Read canonical state strictly: an unreadable journal is not an empty goal.
+
+    Use the append writer's lock so a concurrent partial line never looks like a
+    missing direction. Legacy suggestions are intentionally not inferred goals.
+    """
+    with (memory_dir / "continuity.jsonl").open("r", encoding="utf-8") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+        try:
+            rows = [json.loads(line) for line in handle if line.strip()]
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("project_id") != project_id:
+            raise ValueError("Invalid canonical record scope")
+        ref = row.get("id")
+        if not isinstance(ref, str) or not ref or len(ref) > 160 or any(c.isspace() for c in ref) or ref in seen:
+            raise ValueError("Invalid canonical record identity")
+        seen.add(ref)
+        for key in ("kind", "summary"):
+            if not isinstance(row.get(key), str):
+                raise ValueError("Invalid canonical record content")
+        for key in ("tags", "uncertainty", "sources"):
+            if key in row and not isinstance(row[key], list):
+                raise ValueError("Invalid canonical record collection")
+        if "metadata" in row and not isinstance(row["metadata"], dict):
+            raise ValueError("Invalid canonical record metadata")
+        if not isinstance(row.get("supersedes", []), list) or not all(isinstance(v, str) for v in row.get("supersedes", [])):
+            raise ValueError("Invalid supersession links")
+    return rows
+
+
+def _direction_lineage(records: list[dict[str, Any]]) -> set[str]:
+    successors: dict[str, set[str]] = {}
+    for row in records:
+        for previous in row.get("supersedes") or []:
+            successors.setdefault(previous, set()).add(str(row["id"]))
+    related: set[str] = set()
+    pending = [str(row["id"]) for row in records if row.get("kind") == "direction"]
+    while pending:
+        ref = pending.pop()
+        if ref not in related:
+            related.add(ref)
+            pending.extend(successors.get(ref, ()))
+    # A malformed cycle must not make every direction disappear as 'retired'.
+    incoming = {ref: 0 for ref in related}
+    for previous in related:
+        for ref in successors.get(previous, ()):
+            incoming[ref] += 1
+    pending = [ref for ref, count in incoming.items() if not count]
+    visited = 0
+    while pending:
+        ref = pending.pop()
+        visited += 1
+        for successor in successors.get(ref, ()):
+            incoming[successor] -= 1
+            if not incoming[successor]:
+                pending.append(successor)
+    if visited != len(related):
+        raise ValueError("Cyclic direction supersession")
+    return related
+
+
+def direction_fingerprint(memory_dir: Path, project_id: str) -> dict[str, str]:
+    """Opaque binding for queued work, including private and closed revisions.
+
+    This is an internal invalidation token, never a label or proof of intent.
+    Observation-only changes do not cancel an otherwise unchanged direction.
+    """
+    try:
+        rows = _read_goal_records(memory_dir, project_id)
+        related = _direction_lineage(rows)
+        entries = sorted((str(row["id"]), continuity_fingerprint(row)) for row in rows if str(row["id"]) in related)
+        payload = json.dumps([project_id, entries], ensure_ascii=False, separators=(",", ":"))
+        return {"status": "known", "fingerprint": hashlib.sha256(payload.encode("utf-8")).hexdigest()}
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return {"status": "unknown"}
+
+
+def _view_safe(record: Mapping[str, Any]) -> bool:
+    return (str(record.get("index_policy") or "safe").lower() != "no_rag"
+            and str(record.get("sensitivity") or "project").lower() not in {"sensitive", "secret"})
+
+
+def goal_projection(records: Iterable[Mapping[str, Any]], *, project_id: str) -> dict[str, Any]:
+    """Bounded navigation to saved direction; no goal inference or new ledger.
+
+    A lone saved direction still needs reconciliation with the current user.
+    Competing directions, hidden direction state and kind-changing revisions
+    must never silently select an apparently authoritative older goal.
+    """
+    rows = [dict(row) for row in records]
+    active = active_records(rows)
+    closed = {"done", "complete", "completed", "closed", "resolved", "superseded", "retired", "cancelled", "canceled"}
+    open_rows = [row for row in active if str(row.get("state") or "").lower() not in closed]
+    lineage = _direction_lineage(rows)
+    safe = [row for row in open_rows if _view_safe(row)]
+    directions = [row for row in safe if row.get("kind") == "direction"]
+    changed_kind = [row for row in safe if str(row.get("id")) in lineage and row.get("kind") != "direction"]
+    # Native clients may save a finding with explicit state="checkpoint".
+    # Preserve that navigation intent without inferring a goal from its prose.
+    checkpoints = [row for row in safe if row.get("kind") == "checkpoint"
+                   or str(row.get("state") or "").lower() == "checkpoint"
+                   or "investigation-checkpoint" in (row.get("tags") or [])]
+    hidden_direction = any(str(row.get("id")) in lineage and not _view_safe(row) for row in open_rows)
+    status = "unknown" if hidden_direction else "ambiguous" if len(directions) > 1 or changed_kind else "saved" if directions else "none"
+
+    def preview(row: Mapping[str, Any]) -> dict[str, Any]:
+        summary = safety.redact_analysis_text(str(row.get("summary") or ""))[0]
+        return {
+            "record_id": row["id"], "kind": row.get("kind"),
+            "summary": summary[:240], "summary_truncated": len(summary) > 240,
+            "details_available": bool(row.get("details") or row.get("uncertainty") or row.get("likely_continuation")),
+        }
+
+    # IDs come first and are never cut to satisfy a text budget. Details and
+    # source evidence stay in the original note, with an exact local read route.
+    selected_directions = list(reversed(directions))[:3]
+    selected_checkpoints = list(reversed(checkpoints))[:2]
+    selected_revisions = list(reversed(changed_kind))[:2]
+    selected = selected_directions + selected_checkpoints + selected_revisions
+    refs = list(dict.fromkeys(str(row["id"]) for row in selected))
+    result: dict[str, Any] = {
+        "project_id": project_id, "status": status,
+        "directions": [preview(row) for row in selected_directions],
+        "checkpoints": [preview(row) for row in selected_checkpoints],
+        "unresolved_revisions": [preview(row) for row in selected_revisions],
+        "omitted": {"directions": max(0, len(directions) - 3), "checkpoints": max(0, len(checkpoints) - 2), "revisions": max(0, len(changed_kind) - 2)},
+        "next_calls": [
+            {"tool": "project_search", "arguments": {"name": project_id, "record_ids": refs[start:start + 3], "max_chars": 6000}}
+            for start in range(0, len(refs), 3)
+        ],
+        "policy": "Saved notes are navigation, not current authority. Reconcile with the newest user direction; read exact details before rebuilding TODOs. Checkpoints do not create a goal.",
+    }
+    if status == "unknown":
+        result["reason"] = "direction_state_not_projectable"
+    elif status == "ambiguous":
+        result["reason"] = "multiple_active_directions" if len(directions) > 1 else "direction_revision_changed_kind"
+    return result
+
+
+def load_goal_projection(memory_dir: Path, project_id: str) -> dict[str, Any]:
+    try:
+        return goal_projection(_read_goal_records(memory_dir, project_id), project_id=project_id)
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return {
+            "project_id": project_id, "status": "unknown", "reason": "canonical_state_unavailable",
+            "directions": [], "checkpoints": [], "unresolved_revisions": [], "next_calls": [],
+            "policy": "Recovery failed; this does not mean there is no goal. Keep the current request and unresolved work; retry only when the failure is resolved.",
+        }
+
+
+def goal_projection_lines(projection: Mapping[str, Any]) -> list[str]:
+    """Render the same small navigation view for generated continuity files."""
+    status = str(projection.get("status") or "unknown")
+    messages = {
+        "none": "No active safe direction is saved; exploration needs no invented goal.",
+        "saved": "Saved direction; reconcile with the newest user request before continuing.",
+        "ambiguous": "Direction needs reconciliation; no single goal is selected.",
+        "unknown": "Direction recovery is incomplete; do not treat this as no goal.",
+    }
+    lines = [f"- {messages.get(status, messages['unknown'])}"]
+    for key in ("directions", "checkpoints", "unresolved_revisions"):
+        for row in projection.get(key) or []:
+            # JSON escaping keeps multiline notes from impersonating structure.
+            summary = json.dumps(str(row.get("summary") or ""), ensure_ascii=False)
+            lines.append(f"- [{row['record_id']}] {row.get('kind')}: {summary}")
+    if any(projection.get(key) for key in ("directions", "checkpoints", "unresolved_revisions")):
+        lines.append(f"- Read exact details with project_search(name={json.dumps(str(projection.get('project_id') or ''))}, record_ids=[up to 3 IDs above per call]); details and caveats are not reproduced here.")
+    if any(int(value) for value in (projection.get("omitted") or {}).values()):
+        lines.append("- Additional direction/checkpoint candidates omitted; use targeted project_search before choosing a goal.")
+    return lines
+
+
+def render_goal_projection(projection: Mapping[str, Any], max_chars: int = 1200) -> str:
+    """Whole-line compaction projection with an explicit omission boundary."""
+    budget = max(256, int(max_chars))
+    lines = goal_projection_lines(projection)
+    omitted = "- More saved direction/checkpoint context omitted; recover exact notes through project_search before rebuilding TODOs."
+    output: list[str] = []
+    used = 0
+    for index, line in enumerate(lines):
+        reserve = len(omitted) + 1 if index < len(lines) - 1 else 0
+        if used + len(line) + 1 + reserve > budget:
+            output.append(omitted)
+            break
+        output.append(line)
+        used += len(line) + 1
+    return "\n".join(output)
 
 
 def record_line(record: Mapping[str, Any], max_chars: int = 240) -> str:

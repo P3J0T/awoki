@@ -96,7 +96,17 @@ const plugin = await import({json.dumps(compiled.as_uri())});
 const bridgeCalls = [];
 globalThis.Bun = {{ spawn: (args) => {{
   bridgeCalls.push(args);
-  return {{stdout: new Response("{{}}").body, stderr: new Response("").body, exited: Promise.resolve(0)}};
+  const mid = args[args.indexOf("--message-id") + 1];
+  const isSummary = args.includes("--is-summary");
+  const result = args[2] === "user-turn" ? {{status: "marked", agent_runtime: {{
+    status: "user_turn_recorded", current_turn: {{user_message_id: mid}}
+  }}}} : args[2] === "agent-turn-terminal" ? {{
+    status: isSummary ? "summary_recorded" : "recorded",
+    [isSummary ? "last_compaction_turn" : "last_terminal_turn"]: {{
+      message_id: mid, parent_message_id: args[args.indexOf("--parent-message-id") + 1], is_summary: isSummary
+    }}
+  }} : {{}};
+  return {{stdout: new Response(JSON.stringify(result)).body, stderr: new Response("").body, exited: Promise.resolve(0)}};
 }} }};
 (async () => {{
   const hooks = await plugin.AwokiContinuity({{

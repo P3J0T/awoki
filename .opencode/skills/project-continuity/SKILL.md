@@ -26,6 +26,24 @@ roughly 3–8 bounded items, update it when direction changes, and avoid copying
 prompt or every intermediate thought. Awoki mirrors that projection outside chat so it
 survives compaction; do not create a separate session-intent object just to restate it.
 
+When a multi-step investigation has a goal, reuse an ordinary `kind="direction"`
+note for concise bullets: outcomes, essential constraints, completion conditions
+and exact detail references. Put the returned `cont_...` ID near the start of a
+short TODO alongside the safe goal summary and actual next actions. Handoff and
+`session_work_status` expose the same canonical pointers; open details selectively.
+For changed intent, save `kind="direction", supersedes=[old_direction_id]`, then
+read it back before updating TODO pointers. Use `correction` for factual repairs;
+do not silently replace a direction with an unrelated record kind. Side questions
+alone do not replace the goal. Check evidence against completion conditions and
+retain unresolved work before closing.
+
+No particular goal is a valid exploratory state: keep only useful observations,
+questions and actual next actions. Do not invent completion conditions or create
+a project merely to save a goal. Unattached work can use the native TODO mirror.
+Use privacy-safe descriptions; never copy a secret/no-RAG note or its private
+label into TODOs or generated handoff text. `cont_...` IDs link notes; they are not
+source evidence and do not belong in `sources` in place of `ev_...` handles.
+
 Never store private chain-of-thought. Store only concise operational continuity
 supported by observable work and source references.
 
@@ -136,13 +154,37 @@ smallest authorized check; do not reconstruct certainty from compacted chat.
 ## Compaction-safe operational continuity
 
 OpenCode TODO is a UI projection, not project memory. The continuity plugin mirrors
-bounded native TODO state into Awoki's session work ledger automatically. This works
-for attached projects and for unattached/ad-hoc sessions. After compaction, or when
-exact operational progress is uncertain, call `session_work_status` rather than
-reconstructing the old plan from conversational memory. If `todos_need_review=true`,
-the mirrored TODOs predate a newer user turn: reconcile them with the newest user
-instruction before acting or rewriting TODOs. Never silently restore an older mirrored
-TODO list over newer native OpenCode state.
+bounded native TODO state into Awoki's session work ledger automatically, including
+unattached/ad-hoc sessions. After compaction, use the supplied recovery snapshot.
+Call `session_work_status` when that snapshot is missing or unknown, operational
+progress is uncertain, or full mirrored TODO detail is needed. If
+`todos_need_review=true`, the mirrored TODOs predate a newer user turn: reconcile
+them with the newest user instruction before acting or rewriting TODOs. Never
+silently restore an older mirror over newer native OpenCode state.
+
+The snapshot and `session_work_status.goal_recovery` distinguish a saved direction,
+competing directions, no active saved direction, and unavailable state. The last
+is unknown, not permission to clear TODOs or assume completion. Follow relevant
+`next_calls` for exact current notes; do not merge unrelated goals or repeatedly
+summarize old summaries. An empty TODO list does not cancel a saved direction.
+When ending a goal, save its explicit closed revision rather than clearing TODOs.
+
+The plugin reads one bounded local recovery snapshot per observed completed
+summary and adds it to transient outgoing conversation input; it creates no stored
+user turn or model request. Reconcile the latest human direction, exact-read
+relevant notes, then continue normal work. Active acceptance restrictions take
+precedence over generic recovery: use `acceptance_run_next` first. A failed or
+denied recovery remains unknown, including whether unrestricted actions are
+allowed; recover authoritative state without an automatic retry loop. Activity
+checkpoints preserve operations, not unsaved analytical findings, so save
+meaningful changes during work.
+
+On fork/new session or child delegation, transfer the project and relevant exact
+goal/checkpoint references explicitly; do not import all old TODOs. After undo or
+a restart, reconcile native TODOs and saved direction before queued work resumes.
+An old mirror never authorizes overwriting a newer plan. Changed saved direction
+holds detached automatic continuation until deliberately rescheduled; a side
+question or ordinary observation alone does not cancel it.
 
 For an acceptance/benchmark sequence whose final result depends on exact observations
 from multiple tool calls, do not rely on the chat transcript surviving compaction. Use
@@ -357,6 +399,12 @@ Use stronger labels only when they add meaning:
 - `artifact` / `reflection`: material or operational continuity
 
 A continuity record may also carry details, tags, uncertainty, likely continuation, and sources when those fields are useful. Missing optional fields are not a capture failure.
+
+Explicit investigation checkpoints can return `capture_advice` when no next-check
+field or direction note was saved. Use it to preserve unfinished work when relevant;
+it is not a gate or a request to invent a goal. A direction describes the user's
+requested work, never proof that an edit or test happened. Capture completed actions
+only when the corresponding action and result were observed.
 
 For several investigation conclusions, prefer `project_capture(items=[...])`:
 one scoped observation per item, each with its own `sources=[evidence_ref]` from

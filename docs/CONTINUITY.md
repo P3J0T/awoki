@@ -27,6 +27,61 @@ decisions, and artifacts are sufficient.
 
 Explicit user direction always overrides generated continuation suggestions.
 
+## Goals, TODOs and recovery
+
+A multi-step goal can use an ordinary `direction` note: short outcomes, constraints,
+completion conditions and references to richer detail. Native TODOs show the safe
+summary, exact saved note ID and next actions. `HANDOFF.md`, normal project-open
+and `session_work_status.goal_recovery` derive their navigation from the same
+canonical journal. They retain pointers independently of recent observations;
+bounded views report omitted candidates. They do not copy every detail or certify
+that the model saved the right interpretation.
+
+Changed intent uses another `direction` with `supersedes`; factual correction is
+separate. Multiple active directions and kind-changing revisions require
+reconciliation, rather than silently selecting one by recency. Closed goals no
+longer appear as active. No saved goal is valid exploration; unreadable journal,
+attachment or work state is unknown, never evidence that there is no goal.
+Private/no-RAG direction text is excluded from these generated projections.
+
+After a completed compaction summary, the plugin reads one bounded local recovery
+snapshot (at most 2,500 characters) per summary per plugin instance. It adds that
+safe state to transient outgoing conversation input, with no system message,
+stored user turn, inference request or recursive continuation. The snapshot
+contains verified scope, goal/note pointers and work counts, never raw TODO prose.
+It uses the latest following user message, or the completed summary with its
+matching compaction marker when no user follows. A new compaction marker suppresses
+recovery on summarizer input. Pre-summary context remains reference-only.
+
+Delivery rechecks session and transcript identity after reading. A failed or raced
+read leaves recovery explicitly unknown, including acceptance restrictions, rather
+than inferring an empty goal. Active acceptance contracts receive
+`acceptance_run_next` first. Exact note reads and reconciliation with the latest
+user direction remain model responsibilities: delivery does not prove that the
+model followed the pointers or saved the right interpretation. A plugin restart
+re-derives the boundary from the actual transcript.
+
+The operational mirror stores at most 64 TODOs with 800-character text. The plugin
+transports at most 8,192 characters per TODO locally so canonical redaction and
+reference extraction happen before storage truncation. Complete bounded `cont_`
+pointers survive shortening; truncation/omission flags prevent a compact view
+from implying that omitted work disappeared. Invalid TODO events preserve the
+previous mirror; an explicit empty list clears it without deleting project notes.
+Corrupt work state is preserved for recovery instead of being overwritten.
+
+User/terminal event persistence requires acknowledged state and identity, with
+one event-driven retry after failure. Queued repository continuation is bound to
+an opaque fingerprint of saved direction; changed/unavailable direction requires
+rescheduling. Ordinary observations and side questions do not change that binding.
+Task completion retains detail references and rejects recorded unresolved steps;
+this checks bookkeeping, not the truth of a finding.
+
+Forks, delegated child tasks and fresh sessions need explicit project/note pointers.
+After restart or undo, reconcile native TODOs with saved direction: the mirror is
+not an automatic undo mechanism. The system does not infer missing findings from
+activity counts, automatically restore a whole TODO list, or assume concurrent
+client events are fresh merely because their writes were atomic.
+
 ## Long-session / compaction execution
 
 ```mermaid

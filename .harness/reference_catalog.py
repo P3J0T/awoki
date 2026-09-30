@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import acceptance_runs
+import continuity
 import evidence_store
 import project_workspace
 import safety
@@ -21,6 +22,7 @@ MAX_SCAN_FILES = 256
 RESOLVE_MIN_SCORE = 2.5
 RESOLVE_MIN_MARGIN = 1.0
 _REF_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9._:-]{3,200}$")
+_UNLOADED = object()
 
 
 def _now() -> str:
@@ -69,20 +71,20 @@ def _write_catalog(root: Path, project_id: str, state: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def _continuity_record(root: Path, project_id: str, reference_id: str) -> dict[str, Any] | None:
-    path = project_workspace.paths_for(root, project_id).continuity
+def _current_continuity(root: Path, project_id: str) -> dict[str, dict[str, Any]] | None:
+    """One strict snapshot for navigation; catalog labels never revive old notes."""
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+        pp = project_workspace.paths_for(root, project_id)
+        records = continuity._read_goal_records(pp.memory_dir, pp.project_id)
+    except (OSError, ValueError, TypeError, UnicodeError):
         return None
-    for line in reversed(lines[-2048:]):
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict) and str(row.get("id") or "") == reference_id:
-            return row
-    return None
+    closed = {"done", "complete", "completed", "closed", "resolved", "superseded", "retired", "cancelled", "canceled"}
+    return {
+        str(row["id"]): row
+        for row in project_workspace.view_safe_records(continuity.active_records(records))
+        if str(row.get("state") or "").lower() not in {"retired", "superseded"}
+        and not (row.get("kind") == "direction" and str(row.get("state") or "").lower() in closed)
+    }
 
 
 def _reliability_object(root: Path, project_id: str, reference_id: str) -> dict[str, Any] | None:
@@ -170,7 +172,7 @@ def _candidate_object(root: Path, project_id: str, reference_id: str) -> dict[st
         "occurrence_scan_truncated": False,
     }
 
-def _base_description(root: Path, project_id: str, reference_id: str, *, session_id: str = "") -> dict[str, Any]:
+def _base_description(root: Path, project_id: str, reference_id: str, *, session_id: str = "", _continuity_map: Any = _UNLOADED) -> dict[str, Any]:
     ref = _clean_ref(reference_id)
     if not ref:
         return {"status": "rejected", "reason": "invalid_reference_id", "reference_id": reference_id}
@@ -294,7 +296,10 @@ def _base_description(root: Path, project_id: str, reference_id: str, *, session
                 }
 
     if ref.startswith("cont_"):
-        row = _continuity_record(root, project_id, ref)
+        current = _current_continuity(root, project_id) if _continuity_map is _UNLOADED else _continuity_map
+        if current is None:
+            return {"status": "unavailable", "reason": "continuity_state_unavailable", "reference_id": ref, "project_id": project_id}
+        row = current.get(ref)
         if row:
             return {
                 "status": "ok", "reference_id": ref, "kind": "project_continuity",
@@ -302,9 +307,12 @@ def _base_description(root: Path, project_id: str, reference_id: str, *, session
                 "why_saved": "Project continuity record preserved for later recall, correction, supersession, and provenance-aware continuation.",
                 "origin": {"record_kind": row.get("kind"), "state": row.get("state")},
                 "scope": {"project_id": project_id},
-                "linked_refs": [str(item) for item in (row.get("supersedes") or [])[:MAX_LINKS] if str(item)],
+                "linked_refs": [str(item) for item in (row.get("supersedes") or [])[:MAX_LINKS] if str(item) in current],
                 "created_at": str(row.get("created_at") or row.get("timestamp") or ""),
             }
+        # Missing, private and retired records share one unavailable response;
+        # never leak labels or silently select a superseding record instead.
+        return {"status": "unavailable", "reason": "continuity_reference_unavailable", "reference_id": ref, "project_id": project_id}
 
     return {"status": "not_found", "reference_id": ref, "project_id": project_id}
 
@@ -320,13 +328,18 @@ def annotate(
     linked_refs: list[str] | None = None,
     session_id: str = "",
 ) -> dict[str, Any]:
-    base = _base_description(root, project_id, reference_id, session_id=session_id)
+    current: Any = _UNLOADED
+    if _clean_ref(reference_id).startswith("cont_") or any(_clean_ref(ref).startswith("cont_") for ref in linked_refs or []):
+        current = _current_continuity(root, project_id)
+    base = _base_description(root, project_id, reference_id, session_id=session_id, _continuity_map=current)
     if base.get("status") != "ok":
         return base
     clean_label = _safe_text(label or base.get("label") or "", MAX_LABEL)
     clean_why = _safe_text(why_saved or base.get("why_saved") or "", MAX_WHY)
     clean_aliases = list(dict.fromkeys(_safe_text(item, MAX_LABEL) for item in (aliases or [])[:MAX_ALIASES] if str(item).strip()))
     clean_links = list(dict.fromkeys(ref for ref in (_clean_ref(item) for item in (linked_refs or [])[:MAX_LINKS]) if ref))
+    if any(ref.startswith("cont_") and ref not in (current or {}) for ref in clean_links):
+        return {"status": "rejected", "reason": "linked_continuity_reference_unavailable", "reference_id": str(base["reference_id"])}
     state = _load_catalog(root, project_id)
     entries = dict(state.get("entries") or {})
     entries[str(base["reference_id"])] = {
@@ -341,8 +354,10 @@ def annotate(
     return describe(root, project_id, str(base["reference_id"]), session_id=session_id)
 
 
-def describe(root: Path, project_id: str, reference_id: str, *, session_id: str = "") -> dict[str, Any]:
-    base = _base_description(root, project_id, reference_id, session_id=session_id)
+def describe(root: Path, project_id: str, reference_id: str, *, session_id: str = "", _continuity_map: Any = _UNLOADED) -> dict[str, Any]:
+    if _clean_ref(reference_id).startswith("cont_") and _continuity_map is _UNLOADED:
+        _continuity_map = _current_continuity(root, project_id)
+    base = _base_description(root, project_id, reference_id, session_id=session_id, _continuity_map=_continuity_map)
     if base.get("status") != "ok":
         return base
     entry = dict((_load_catalog(root, project_id).get("entries") or {}).get(str(base["reference_id"])) or {})
@@ -356,15 +371,22 @@ def describe(root: Path, project_id: str, reference_id: str, *, session_id: str 
         base["annotation_updated_at"] = str(entry.get("updated_at") or "")
     else:
         base["aliases"] = []
+    if any(str(ref).startswith("cont_") for ref in base.get("linked_refs") or []):
+        if _continuity_map is _UNLOADED:
+            _continuity_map = _current_continuity(root, project_id)
+        base["linked_refs"] = [ref for ref in base["linked_refs"]
+                               if not str(ref).startswith("cont_") or ref in (_continuity_map or {})]
     base["reference_contract"] = "Stable ID is authoritative; label/why_saved/aliases are human navigation metadata and never replace provenance or evidence identity."
     return base
 
 
-def _candidate_descriptors(root: Path, project_id: str, *, session_id: str = "") -> list[dict[str, Any]]:
+def _candidate_descriptors(root: Path, project_id: str, *, session_id: str = "", _continuity_map: Any = _UNLOADED) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    if _continuity_map is _UNLOADED:
+        _continuity_map = _current_continuity(root, project_id)
     catalog = _load_catalog(root, project_id)
     for ref in list((catalog.get("entries") or {}).keys())[-MAX_ENTRIES:]:
-        desc = describe(root, project_id, ref, session_id=session_id)
+        desc = describe(root, project_id, ref, session_id=session_id, _continuity_map=_continuity_map)
         if desc.get("status") == "ok":
             rows.append(desc)
 
@@ -374,14 +396,14 @@ def _candidate_descriptors(root: Path, project_id: str, *, session_id: str = "")
     acceptance_dir = project_workspace.paths_for(root, project_id).artifacts_dir / "acceptance"
     linked_evidence: list[str] = []
     for path in list(acceptance_dir.glob("acr_*.json"))[-128:] if acceptance_dir.is_dir() else []:
-        desc = describe(root, project_id, path.stem, session_id=session_id)
+        desc = describe(root, project_id, path.stem, session_id=session_id, _continuity_map=_continuity_map)
         if desc.get("status") == "ok":
             rows.append(desc)
             for ref in desc.get("linked_refs") or []:
                 if str(ref).startswith("ev_") and ref not in linked_evidence:
                     linked_evidence.append(str(ref))
     for ref in linked_evidence[-64:]:
-        desc = describe(root, project_id, ref, session_id=session_id)
+        desc = describe(root, project_id, ref, session_id=session_id, _continuity_map=_continuity_map)
         if desc.get("status") == "ok":
             rows.append(desc)
 
@@ -425,30 +447,14 @@ def _candidate_descriptors(root: Path, project_id: str, *, session_id: str = "")
                     "aliases": [], "origin": {"reliability_run_id": run_id}, "scope": {"project_id": project_id},
                     "linked_refs": [str(item.get("evidence_ref")) for item in (row.get("evidence_refs") or []) if isinstance(item, dict) and item.get("evidence_ref")][:MAX_LINKS],
                 })
-    continuity_path = project_workspace.paths_for(root, project_id).continuity
-    try:
-        continuity_lines = continuity_path.read_text(encoding="utf-8").splitlines()[-256:]
-    except OSError:
-        continuity_lines = []
-    for line in continuity_lines:
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict) or not str(row.get("id") or "").startswith("cont_"):
-            continue
-        rows.append({
-            "status": "ok", "reference_id": str(row["id"]), "kind": "project_continuity",
-            "label": _safe_text(row.get("summary") or row.get("text") or "Project continuity record", MAX_LABEL),
-            "why_saved": "Project continuity record preserved for later recall, correction, supersession, and provenance-aware continuation.",
-            "aliases": [], "origin": {"record_kind": row.get("kind"), "state": row.get("state")},
-            "scope": {"project_id": project_id}, "linked_refs": [str(item) for item in (row.get("supersedes") or [])[:MAX_LINKS] if str(item)],
-        })
+    for ref in list(_continuity_map or {})[-256:]:
+        if ref.startswith("cont_"):
+            rows.append(_base_description(root, project_id, ref, _continuity_map=_continuity_map))
 
     if session_id:
         for row in work_ledger.status(root, session_id).get("todos") or []:
             if isinstance(row, dict) and row.get("id"):
-                desc = describe(root, project_id, str(row["id"]), session_id=session_id)
+                desc = describe(root, project_id, str(row["id"]), session_id=session_id, _continuity_map=_continuity_map)
                 if desc.get("status") == "ok":
                     rows.append(desc)
 
@@ -461,8 +467,9 @@ def _candidate_descriptors(root: Path, project_id: str, *, session_id: str = "")
             continue
         if ref not in dedup or ref in annotated_ids:
             if ref in annotated_ids:
-                desc = describe(root, project_id, ref, session_id=session_id)
-                dedup[ref] = desc if desc.get("status") == "ok" else row
+                desc = describe(root, project_id, ref, session_id=session_id, _continuity_map=_continuity_map)
+                if desc.get("status") == "ok":
+                    dedup[ref] = desc
             else:
                 dedup[ref] = row
     return list(dedup.values())
@@ -476,19 +483,21 @@ def resolve(root: Path, project_id: str, query: str, *, limit: int = 8, session_
     if exact:
         described = describe(root, project_id, exact, session_id=session_id)
         matches = [described] if described.get("status") == "ok" else []
+        unknown = described.get("reason") == "continuity_state_unavailable"
         return {
-            "status": "ok", "query": q, "matches": matches,
+            "status": "unknown" if unknown else "ok", "query": q, "matches": matches,
             "resolution": {
-                "status": "exact" if matches else "not_found",
+                "status": "unknown" if unknown else "exact" if matches else "not_found",
                 "resolved_reference_id": exact if matches else "",
-                "reason": "stable_reference_id_supplied" if matches else "stable_reference_not_found",
+                "reason": "continuity_state_unavailable" if unknown else "stable_reference_id_supplied" if matches else "stable_reference_not_found",
             },
             "resolved_reference_id": exact if matches else "",
             "resolution_boundary": "Natural-language resolution is navigation only. Use the returned stable reference_id for authoritative retrieval/verification.",
         }
     terms = [term for term in re.findall(r"[a-z0-9_.:-]+", q.lower()) if len(term) >= 2]
     matches: list[tuple[float, dict[str, Any]]] = []
-    for row in _candidate_descriptors(root, project_id, session_id=session_id):
+    current = _current_continuity(root, project_id)
+    for row in _candidate_descriptors(root, project_id, session_id=session_id, _continuity_map=current):
         hay = " ".join([
             str(row.get("reference_id") or ""), str(row.get("label") or ""), str(row.get("why_saved") or ""),
             " ".join(str(item) for item in row.get("aliases") or []), json.dumps(row.get("origin") or {}, ensure_ascii=False),
@@ -511,7 +520,11 @@ def resolve(root: Path, project_id: str, query: str, *, limit: int = 8, session_
     top = float(matches[0][0]) if matches else 0.0
     second = float(matches[1][0]) if len(matches) > 1 else 0.0
     margin = top - second if matches else 0.0
-    if not matches:
+    if current is None:
+        resolution_status = "unknown"
+        reason = "continuity_state_unavailable"
+        resolved = ""
+    elif not matches:
         resolution_status = "not_found"
         reason = "no_matching_reference"
         resolved = ""
@@ -528,7 +541,7 @@ def resolve(root: Path, project_id: str, query: str, *, limit: int = 8, session_
         reason = "single_clear_navigation_match"
         resolved = str(matches[0][1].get("reference_id") or "")
     return {
-        "status": "ok", "query": q, "project_id": project_id, "matches": picked,
+        "status": "unknown" if current is None else "ok", "query": q, "project_id": project_id, "matches": picked,
         "resolution": {
             "status": resolution_status,
             "resolved_reference_id": resolved,
@@ -573,6 +586,7 @@ def compact_context(root: Path, project_id: str, *, session_id: str = "", max_ch
             })
 
     references_need_review = False
+    current_continuity: Any = _UNLOADED
     if session_id:
         work = work_ledger.status(root, session_id)
         references_need_review = bool(work.get("references_need_review"))
@@ -584,6 +598,15 @@ def compact_context(root: Path, project_id: str, *, session_id: str = "", max_ch
             ref_id = str(row.get("reference_id") or "")
             if not ref_id or any(existing["reference_id"] == ref_id for existing in rows):
                 continue
+            if ref_id.startswith("cont_"):
+                if current_continuity is _UNLOADED:
+                    current_continuity = _current_continuity(root, project_id)
+                desc = describe(root, project_id, ref_id, session_id=session_id, _continuity_map=current_continuity)
+                if desc.get("status") != "ok":
+                    continue
+                # The current canonical record/catalog supplies navigation text;
+                # stale working-set labels cannot revive a retired/private note.
+                row = desc
             rows.append({
                 "reference_id": ref_id,
                 "label": _safe_text(row.get("label") or ref_id, MAX_LABEL),

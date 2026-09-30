@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -52,9 +53,30 @@ def _lock(path: Path) -> Iterator[None]:
 def _read(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return {}
+    # Corruption/permission failures are not an empty plan. Mutators must not
+    # overwrite the only recoverable copy with a fresh base state.
+    if not isinstance(value, dict) or not value:
+        raise ValueError("Invalid session work state")
+    if not isinstance(value.get("todos", []), list):
+        raise ValueError("Invalid session TODO state")
+    for key in ("todo_generation", "next_todo_sequence", "user_turn_generation", "compaction_generation", "todos_omitted"):
+        if key in value and (type(value[key]) is not int or value[key] < 0):
+            raise ValueError("Invalid session generation")
+    for row in value.get("todos", []):
+        if not isinstance(row, dict) or not isinstance(row.get("content"), str):
+            raise ValueError("Invalid stored TODO")
+        refs = row.get("record_refs", [])
+        if not isinstance(refs, list) or any(not isinstance(ref, str) or len(ref) > MAX_ID for ref in refs):
+            raise ValueError("Invalid stored TODO references")
+    references = value.get("active_references", [])
+    if not isinstance(references, list) or any(
+        not isinstance(row, dict) or type(row.get("user_turn_generation", 0)) is not int
+        for row in references
+    ):
+        raise ValueError("Invalid session reference state")
+    return value
 
 
 def _write(path: Path, value: dict[str, Any]) -> None:
@@ -90,10 +112,11 @@ def _base(session_id: str) -> dict[str, Any]:
 def _clean_todo(raw: Any) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
-    content = str(raw.get("content") or "").strip()[:MAX_CONTENT]
+    raw_content = str(raw.get("content") or "").strip()
+    original, redacted = safety.redact_text(raw_content)
+    content = original[:MAX_CONTENT]
     if not content:
         return None
-    content, redacted = safety.redact_text(content)
     source_id = str(raw.get("id") or "").strip()[:MAX_ID]
     status = str(raw.get("status") or "pending").strip().lower()
     priority = str(raw.get("priority") or "medium").strip().lower()
@@ -101,7 +124,16 @@ def _clean_todo(raw: Any) -> dict[str, Any] | None:
         status = "pending"
     if priority not in _ALLOWED_PRIORITY:
         priority = "medium"
-    return {"id": "", "source_id": source_id, "content": content, "status": status, "priority": priority, "redacted": bool(redacted)}
+    # Extract only from redacted text, never untrusted reference metadata or a
+    # credential value that happens to look like a continuity ID.
+    refs = list(dict.fromkeys(ref for ref in re.findall(r"\bcont_[A-Za-z0-9_-]+\b", original)
+                              if isinstance(ref, str) and len(ref) <= MAX_ID and re.fullmatch(r"cont_[A-Za-z0-9_-]+", ref)))
+    return {"id": "", "source_id": source_id, "content": content, "status": status,
+            "priority": priority, "redacted": bool(redacted),
+            "content_truncated": len(original) > MAX_CONTENT or raw.get("content_truncated") is True,
+            # Navigation hints only; exact project recall validates identity,
+            # retirement and privacy. Preserve pointers beyond the text limit.
+            "record_refs": refs[:8], "record_refs_omitted": max(0, len(refs) - 8)}
 
 
 
@@ -180,25 +212,42 @@ def _reconcile_todo_ids(state: dict[str, Any], cleaned: list[dict[str, Any]]) ->
         assigned.append(item)
     return assigned
 
-def sync_todos(root: Path, session_id: str, todos: list[Any]) -> dict[str, Any]:
+def sync_todos(root: Path, session_id: str, todos: list[Any], *, todos_omitted: int = 0) -> dict[str, Any]:
     if not session_id.strip():
         return {"status": "ignored", "reason": "missing_session_id"}
+    if not isinstance(todos, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("content"), str)
+        or not item["content"].strip()
+        for item in todos
+    ):
+        return {"status": "rejected", "reason": "invalid_todos", "previous_state_preserved": True}
     path = _path(root, session_id)
+    source_omitted = min(todos_omitted, 1_000_000) if type(todos_omitted) is int and todos_omitted >= 0 else 0
     cleaned = [row for item in todos[:MAX_TODOS] if (row := _clean_todo(item)) is not None]
     with _lock(path):
         state = {**_base(session_id), **_read(path)}
-        current_project = project_workspace.current_project_id(root, session_id=session_id) or ""
+        attachment = project_workspace.session_attachment_status(root, session_id)
+        if attachment["status"] == "unknown":
+            return {"status": "rejected", "reason": "session_scope_unavailable", "previous_state_preserved": True}
+        current_project = attachment["project_id"]
         state["schema"] = SCHEMA
         reconciled = _reconcile_todo_ids(state, cleaned)
+        old_todos = state.get("todos") or []
+        comparable = lambda rows: [(row.get("content"), row.get("status"), row.get("priority")) for row in rows]
+        unchanged = comparable(old_todos) == comparable(reconciled)
+        old_project = str(state.get("project_id") or "")
+        stale_scope = bool(old_project and old_project != current_project and old_todos and unchanged)
         state.update({
-            "project_id": current_project,
+            "project_id": old_project if stale_scope else current_project,
             "updated_at": _now(),
             "todo_generation": int(state.get("todo_generation") or 0) + 1,
-            "todos_need_review": False,
+            "todos_need_review": stale_scope or (unchanged and bool(state.get("todos_need_review"))),
             "todos": reconciled,
+            "todos_omitted": max(0, len(todos) - MAX_TODOS) + source_omitted,
         })
         _write(path, state)
-    return {"status": "saved", "project_id": current_project, "todo_count": len(cleaned), "todo_generation": state["todo_generation"]}
+    return {"status": "saved", "project_id": state["project_id"], "todo_count": len(cleaned),
+            "todos_need_review": state["todos_need_review"], "todo_generation": state["todo_generation"]}
 
 
 
@@ -324,7 +373,12 @@ def status(root: Path, session_id: str) -> dict[str, Any]:
         return {"status": "ignored", "reason": "missing_session_id"}
     path = _path(root, session_id)
     with _lock(path):
-        state = _read(path)
+        try:
+            state = _read(path)
+        except (OSError, ValueError):
+            return {"status": "unknown", "session_key": _key(session_id),
+                    "reason": "work_state_unavailable", "todos_need_review": True,
+                    "recovery_advice": "Do not infer an empty or completed plan; preserve native TODOs and recover saved project notes."}
         if not state:
             return {"status": "none", "session_key": _key(session_id), "todos": []}
         state = {**_base(session_id), **state}
@@ -344,23 +398,42 @@ def status(root: Path, session_id: str) -> dict[str, Any]:
 
 def compact_context(root: Path, session_id: str, *, max_chars: int = 8_000) -> str:
     state = status(root, session_id)
-    if state.get("status") != "ok" or not state.get("todos"):
+    if state.get("status") == "ignored":
         return ""
+    if state.get("status") == "none":
+        return ("## Awoki active session work\nNo mirrored TODOs. After compaction recover session_work_status once; reconcile current user direction. Exploration needs no invented goal.")[:max(0, max_chars)]
     lines = [
         "## Awoki active session work",
         "",
-        "This bounded TODO projection preserves the user's current multi-step goal/deliverables across compaction. It is local operational state, not private reasoning and not canonical project knowledge.",
-        "The user's newest instruction always overrides older TODOs. If `needs review` is true, the snapshot predates the latest user turn and must be reconciled before acting.",
+        "After compaction, call session_work_status once; exact-read relevant saved notes and reconcile the newest user direction. Preserve acceptance_run_next restrictions when active. TODOs are a projection, not evidence or completion proof. No declared goal is required.",
+        f"work_status: {state.get('status')}",
         f"project_at_last_todo_update: {state.get('project_id') or 'unattached/ad-hoc'}",
         f"todo_generation: {int(state.get('todo_generation') or 0)}",
         f"compaction_generation: {int(state.get('compaction_generation') or 0)}",
         f"needs review: {'true' if state.get('todos_need_review') else 'false'}",
-        "",
-        "Current TODO projection:",
     ]
-    for todo in list(state.get("todos") or [])[:MAX_TODOS]:
-        lines.append(
+    if state.get("status") == "unknown":
+        lines.append("Work recovery unavailable; do not infer no goal, clear TODOs or declare completion.")
+    todos = list(state.get("todos") or [])[:MAX_TODOS]
+    if not todos and state.get("status") != "unknown":
+        lines.append("No mirrored TODOs. Continue ad-hoc work without inventing a goal; saved project direction may still exist.")
+    rendered = 0
+    # Reserve an explicit omission warning rather than cutting an ID or TODO in
+    # half. The full bounded mirror remains available via session_work_status.
+    tail_budget = 160
+    for todo in todos:
+        refs = list(todo.get("record_refs") or [])
+        row = (
             f"- [{todo.get('status','pending')}] ({todo.get('priority','medium')}) "
-            f"{todo.get('id','')} {todo.get('content','')}"
+            f"{todo.get('id','')} " + (f"refs={','.join(refs)} " if refs else "")
+            + str(todo.get('content') or '')
+            + (" [content shortened; recover saved detail]" if todo.get("content_truncated") else "")
         )
-    return "\n".join(lines)[:max_chars]
+        if len("\n".join([*lines, row])) > max_chars - tail_budget:
+            break
+        lines.append(row)
+        rendered += 1
+    omitted = len(todos) - rendered + int(state.get("todos_omitted") or 0)
+    if omitted:
+        lines.append(f"TODOs omitted: {omitted}. Use session_work_status; reconcile with native TODOs. Omitted work is not completed.")
+    return "\n".join(lines)[:max(0, max_chars)]
